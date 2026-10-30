@@ -1,0 +1,316 @@
+using System.Diagnostics.CodeAnalysis;
+using Microsoft.AspNetCore.Components;
+using Microsoft.JSInterop;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+
+namespace Radzen.Blazor
+{
+    /// <summary>
+    /// RadzenGoogleMap component.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// &lt;RadzenGoogleMap Zoom="3" Center=@(new GoogleMapPosition() { Lat = 42.6977, Lng = 23.3219 }) MapClick=@OnMapClick MarkerClick=@OnMarkerClick"&gt;
+    ///     &lt;Markers&gt;
+    ///         &lt;RadzenGoogleMapMarker Title="London" Label="London" Position=@(new GoogleMapPosition() { Lat = 51.5074, Lng = 0.1278 }) /&gt;
+    ///         &lt;RadzenGoogleMapMarker Title="Paris " Label="Paris" Position=@(new GoogleMapPosition() { Lat = 48.8566, Lng = 2.3522 }) /&gt;
+    ///     &lt;/Markers&gt;
+    /// &lt;/RadzenGoogleMap&gt;
+    /// @code {
+    ///   void OnMapClick(GoogleMapClickEventArgs args)
+    ///   {
+    ///     Console.WriteLine($"Map clicked at Lat: {args.Position.Lat}, Lng: {args.Position.Lng}");
+    ///   }
+    ///   
+    ///   void OnMarkerClick(RadzenGoogleMapMarker marker)
+    ///   {
+    ///     Console.WriteLine($"Map {marker.Title} marker clicked. Marker position -> Lat: {marker.Position.Lat}, Lng: {marker.Position.Lng}");
+    ///   }
+    /// }
+    /// </code>
+    /// </example>
+    public partial class RadzenGoogleMap : RadzenComponent
+    {
+        IJSObjectReference? _jsRef;
+        int _jsRefVersion;
+        /// <summary>
+        /// Gets or sets the data - collection of RadzenGoogleMapMarker.
+        /// </summary>
+        /// <value>The data.</value>
+        [Parameter]
+        public IEnumerable<RadzenGoogleMapMarker>? Data { get; set; }
+
+        /// <summary>
+        /// Gets or sets the map click callback.
+        /// </summary>
+        /// <value>The map click callback.</value>
+        [Parameter]
+        public EventCallback<GoogleMapClickEventArgs> MapClick { get; set; }
+
+        /// <summary>
+        /// Gets or sets the marker click callback.
+        /// </summary>
+        /// <value>The marker click callback.</value>
+        [Parameter]
+        public EventCallback<RadzenGoogleMapMarker> MarkerClick { get; set; }
+
+        /// <summary>
+        /// Gets or sets the callback raised when the visible map area changes. It fires once the map is loaded and each time the map becomes idle after panning or zooming.
+        /// </summary>
+        /// <value>The bounds changed callback.</value>
+        [Parameter]
+        public EventCallback<GoogleMapBoundsChangedEventArgs> BoundsChanged { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Google API key.
+        /// </summary>
+        /// <value>The Google API key.</value>
+        [Parameter]
+        public string? ApiKey { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Google Map Id.
+        /// </summary>
+        /// <value>The Google Map Id.</value>
+        [Parameter]
+        public string? MapId { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Google map options: https://developers.google.com/maps/documentation/javascript/reference/map#MapOptions.
+        /// </summary>
+        /// <value>The Google map options.</value>
+        [Parameter]
+        public Dictionary<string, object>? Options { get; set; }
+
+        double zoom = 8;
+        /// <summary>
+        /// Gets or sets the zoom.
+        /// </summary>
+        /// <value>The zoom.</value>
+        [Parameter]
+        public double Zoom
+        {
+            get
+            {
+                return zoom;
+            }
+            set
+            {
+                if (zoom != value)
+                {
+                    zoom = value;
+
+                    InvokeAsync(UpdateMap);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Flag indicating whether map will be zoomed to marker bounds on update or not.
+        /// </summary>
+        [Parameter]
+        public bool FitBoundsToMarkersOnUpdate { get; set; } = false;
+
+        GoogleMapPosition center = new GoogleMapPosition() { Lat = 0, Lng = 0 };
+        /// <summary>
+        /// Gets or sets the center map position.
+        /// </summary>
+        /// <value>The center.</value>
+        [Parameter]
+        public GoogleMapPosition Center
+        {
+            get
+            {
+                return center;
+            }
+            set
+            {
+                if (!object.Equals(center, value))
+                {
+                    center = value;
+
+                    InvokeAsync(UpdateMap);
+                }
+            }
+        }
+
+        async Task UpdateMap()
+        {
+            if (!firstRender && JSRuntime != null)
+            {
+                await JSRuntime.InvokeVoidAsync("Radzen.updateMap", UniqueID, ApiKey, Zoom, Center);
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the markers.
+        /// </summary>
+        /// <value>The markers.</value>
+        [Parameter]
+        public RenderFragment? Markers { get; set; }
+
+        List<RadzenGoogleMapMarker> markers = new List<RadzenGoogleMapMarker>();
+
+        /// <summary>
+        /// Adds the marker.
+        /// </summary>
+        /// <param name="marker">The marker.</param>
+        public void AddMarker(RadzenGoogleMapMarker marker)
+        {
+            if (markers.IndexOf(marker) == -1)
+            {
+                markers.Add(marker);
+            }
+        }
+
+        /// <summary>
+        /// Removes the marker.
+        /// </summary>
+        /// <param name="marker">The marker.</param>
+        public void RemoveMarker(RadzenGoogleMapMarker marker)
+        {
+            if (markers.IndexOf(marker) != -1)
+            {
+                markers.Remove(marker);
+            }
+        }
+
+        /// <inheritdoc />
+        protected override string GetComponentCssClass()
+        {
+            return "rz-map";
+        }
+
+        /// <summary>
+        /// Handles the MapClick event.
+        /// </summary>
+        /// <param name="args">The <see cref="GoogleMapClickEventArgs"/> instance containing the event data.</param>
+        [JSInvokable("RadzenGoogleMap.OnMapClick")]
+        public async System.Threading.Tasks.Task OnMapClick(GoogleMapClickEventArgs args)
+        {
+            await MapClick.InvokeAsync(args);
+        }
+
+        /// <summary>
+        /// Called when marker click.
+        /// </summary>
+        /// <param name="marker">The marker.</param>
+        [JSInvokable("RadzenGoogleMap.OnMarkerClick")]
+        public async System.Threading.Tasks.Task OnMarkerClick(RadzenGoogleMapMarker marker)
+        {
+            await MarkerClick.InvokeAsync(marker);
+        }
+
+        /// <summary>
+        /// Handles the BoundsChanged event.
+        /// </summary>
+        /// <param name="args">The <see cref="GoogleMapBoundsChangedEventArgs"/> instance containing the event data.</param>
+        [JSInvokable("RadzenGoogleMap.OnBoundsChanged")]
+        public async System.Threading.Tasks.Task OnBoundsChanged(GoogleMapBoundsChangedEventArgs args)
+        {
+            await BoundsChanged.InvokeAsync(args);
+        }
+
+        bool firstRender = true;
+        bool _visibleChanged;
+
+        /// <inheritdoc />
+        public override async Task SetParametersAsync(ParameterView parameters)
+        {
+            if (parameters.DidParameterChange(nameof(Visible), Visible))
+            {
+                _visibleChanged = true;
+            }
+
+            await base.SetParametersAsync(parameters);
+        }
+
+        /// <inheritdoc />
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(GoogleMapMarkerData))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(GoogleMapPosition))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(GoogleMapClickEventArgs))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(GoogleMapBoundsChangedEventArgs))]
+        protected override async Task OnAfterRenderAsync(bool firstRender)
+        {
+            await base.OnAfterRenderAsync(firstRender);
+
+            this.firstRender = firstRender;
+
+            var data = Data != null ? Data : markers;
+
+            if (JSRuntime != null)
+            {
+                if (firstRender || _visibleChanged)
+                {
+                    _visibleChanged = false;
+
+                    var version = ++_jsRefVersion;
+                    var jsRef = _jsRef;
+                    _jsRef = null;
+
+                    if (jsRef != null)
+                    {
+                        await jsRef.InvokeVoidAsync("dispose");
+                        await jsRef.DisposeAsync();
+                    }
+
+                    if (version != _jsRefVersion)
+                    {
+                        return;
+                    }
+
+                    if (Visible)
+                    {
+                        var created = await JSRuntime.InvokeAsync<IJSObjectReference>("Radzen.createMap", Element, Reference, UniqueID, ApiKey, MapId, Zoom, Center,
+                             data.Select(m => new GoogleMapMarkerData { Title = m.Title, Label = m.Label, Position = m.Position }), Options, FitBoundsToMarkersOnUpdate, Culture.TwoLetterISOLanguageName);
+
+                        if (version == _jsRefVersion)
+                        {
+                            _jsRef = created;
+                        }
+                        else if (created != null)
+                        {
+                            await created.InvokeVoidAsync("dispose");
+                            await created.DisposeAsync();
+                        }
+                    }
+                }
+                else if (Visible && _jsRef != null)
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.updateMap", UniqueID, ApiKey, null, null,
+                                 data.Select(m => new GoogleMapMarkerData { Title = m.Title, Label = m.Label, Position = m.Position }), Options, FitBoundsToMarkersOnUpdate, Culture.TwoLetterISOLanguageName);
+                }
+            }
+        }
+
+        /// <inheritdoc />
+        public override void Dispose()
+        {
+            base.Dispose();
+
+            _jsRefVersion++;
+            var jsRef = _jsRef;
+            _jsRef = null;
+
+            if (IsJSRuntimeAvailable && jsRef != null)
+            {
+                jsRef.InvokeVoid("dispose");
+                jsRef.DisposeFireAndForget();
+            }
+
+            GC.SuppressFinalize(this);
+        }
+    }
+
+    internal class GoogleMapMarkerData
+    {
+        public string? Title { get; set; }
+
+        public string? Label { get; set; }
+
+        public GoogleMapPosition? Position { get; set; }
+    }
+}

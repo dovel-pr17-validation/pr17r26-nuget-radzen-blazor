@@ -1,0 +1,487 @@
+@use 'sass:map';
+$rz-timeline-item-padding: 0.5rem !default;
+$rz-timeline-axis-size: 4rem !default;
+$rz-timeline-point-size: 1rem !default;
+$rz-timeline-point-border: 3px solid var(--rz-base-background-color) !default;
+$rz-timeline-point-border-radius: calc(var(--rz-border-radius) * 12) !default;
+$rz-timeline-point-background-color: var(--rz-base-300) !default;
+$rz-timeline-point-color: var(--rz-text-color) !default;
+$rz-timeline-line-color: var(--rz-base-300) !default;
+$rz-timeline-line-width: 0.125rem !default;
+$rz-timeline-line-border-radius: calc(var(--rz-border-radius) * 20) !default;
+$rz-timeline-point-font-size: 1rem !default;
+$rz-timeline-line-gap: 0px !default;
+$rz-timeline-point-ring-width: 0.25rem !default;
+$rz-timeline-point-ring-tint: 35% !default;
+
+// The current-step ring is drawn from the point's own colour, which works for every severity but not
+// for the muted base/light/dark points - a 35% tint of those is invisible against the page. They ring
+// in a mid-scale grey instead, which reads on a light and a dark ground alike.
+$timeline-point-ring-colors: () !default;
+$timeline-point-ring-colors: map.merge(
+  (
+    base: var(--rz-base-500),
+    light: var(--rz-base-500),
+    dark: var(--rz-base-500)
+  ),
+  $timeline-point-ring-colors
+);
+$rz-timeline-line-position-offset: calc(var(--rz-timeline-item-padding) + (var(--rz-timeline-axis-size) / 2) - (var(--rz-timeline-line-width) / 2));
+
+// Distance from the item's leading edge to the centre of its point, along the timeline's main axis.
+// The line is split there into a leading and a trailing half so each connector can be styled on its own.
+$rz-timeline-point-offset-start: calc(var(--rz-timeline-item-padding) + (var(--rz-timeline-point-size) / 2));
+$rz-timeline-point-offset-end: calc(100% - var(--rz-timeline-item-padding) - (var(--rz-timeline-point-size) / 2));
+
+$timeline-point-sizes: () !default;
+$timeline-point-sizes: map.merge(
+  (
+    lg: (
+      size: 3rem,
+      font-size: 2rem
+    ),
+    md: (
+      size: 1.5rem,
+      font-size: 1rem
+    ),
+    sm: (
+      size: 1rem,
+      font-size: 0.625rem
+    ),
+    xs: (
+      size: 0.75rem,
+      font-size: 0.5rem
+    )
+  ),
+  $timeline-point-sizes
+);
+
+.rz-timeline {
+  box-sizing: border-box;
+  display: flex;
+
+  // Orientation.Vertical
+  &.rz-timeline-column {
+    flex-direction: column;
+
+    // The line offset is the same whether or not the timeline is reversed; only the content alignment
+    // below differs, so these sit above the reverse split rather than being repeated inside it.
+    &.rz-timeline-start {
+      .rz-timeline-item:before,
+      .rz-timeline-item:after {inset-inline-start: $rz-timeline-line-position-offset; inset-inline-end: auto;}
+    }
+
+    &.rz-timeline-end {
+      .rz-timeline-item:before,
+      .rz-timeline-item:after {inset-inline-end: $rz-timeline-line-position-offset; inset-inline-start: auto;}
+    }
+
+    &.rz-timeline-left {
+      .rz-timeline-item:before,
+      .rz-timeline-item:after {left: $rz-timeline-line-position-offset; right: auto;}
+    }
+
+    &.rz-timeline-right {
+      .rz-timeline-item:before,
+      .rz-timeline-item:after {right: $rz-timeline-line-position-offset; left: auto;}
+    }
+
+    // LinePosition.Center
+    .rz-timeline-item {flex-direction: row;}
+    .rz-timeline-content-start {text-align: end;}
+    .rz-timeline-content-end {text-align: start;}
+
+    // LinePosition.Alternate
+    &.rz-timeline-alternate {
+      .rz-timeline-item:nth-child(even) {
+        flex-direction: row-reverse;
+
+        .rz-timeline-content-start {text-align: start;}
+        .rz-timeline-content-end {text-align: end;}
+      }
+    }
+
+    // LinePosition.Start
+    &.rz-timeline-start:not(.rz-timeline-reverse) {
+      .rz-timeline-content-start {display: none;}
+      .rz-timeline-content-end {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: start;}
+    }
+
+    // LinePosition.End
+    &.rz-timeline-end:not(.rz-timeline-reverse) {
+      .rz-timeline-item {flex-direction: row-reverse;}
+      .rz-timeline-content-start {display: none;}
+      .rz-timeline-content-end {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: end;}
+    }
+
+    // LinePosition.Left
+    &.rz-timeline-left:not(.rz-timeline-reverse) {
+      .rz-timeline-content-start {display: none;}
+      .rz-timeline-content-end {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: left;}
+
+      *[dir="rtl"] & .rz-timeline-item {flex-direction: row-reverse;}
+    }
+
+    // LinePosition.Right
+    &.rz-timeline-right:not(.rz-timeline-reverse) {
+      .rz-timeline-item {flex-direction: row-reverse;}
+      .rz-timeline-content-start {display: none;}
+      .rz-timeline-content-end {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: right;}
+
+      *[dir="rtl"] & .rz-timeline-item {flex-direction: row;}
+    }
+
+    // Orientation.Vertical Reverse
+    &.rz-timeline-reverse {
+
+      // LinePosition.Center
+      .rz-timeline-item {flex-direction: row-reverse;}
+      .rz-timeline-content-start {text-align: start;}
+      .rz-timeline-content-end {text-align: end;}
+
+      // LinePosition.Alternate
+      &.rz-timeline-alternate {
+        .rz-timeline-item:nth-child(even) {
+          flex-direction: row;
+
+          .rz-timeline-content-start {text-align: end;}
+          .rz-timeline-content-end {text-align: start;}
+        }
+      }
+
+      // LinePosition.Start
+      &.rz-timeline-start {
+        .rz-timeline-content-start {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: start;}
+        .rz-timeline-content-end {display: none;}
+      }
+
+      // LinePosition.End
+      &.rz-timeline-end {
+        .rz-timeline-item {flex-direction: row;}
+        .rz-timeline-content-start {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: end;}
+        .rz-timeline-content-end {display: none;}
+      }
+
+      // LinePosition.Left
+      &.rz-timeline-left {
+        .rz-timeline-content-start {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: left;}
+        .rz-timeline-content-end {display: none;}
+
+        *[dir="rtl"] & .rz-timeline-item {flex-direction: row;}
+      }
+
+      // LinePosition.Right
+      &.rz-timeline-right {
+        .rz-timeline-item {flex-direction: row;}
+        .rz-timeline-content-start {max-width: calc(100% - var(--rz-timeline-axis-size)); text-align: right;}
+        .rz-timeline-content-end {display: none;}
+
+        *[dir="rtl"] & .rz-timeline-item {flex-direction: row-reverse;}
+      }
+    }
+  }
+
+  // Orientation.Horizontal
+  &.rz-timeline-row {
+    flex-direction: row;
+
+    &.rz-timeline-start,
+    &.rz-timeline-top {
+      .rz-timeline-item:before,
+      .rz-timeline-item:after {top: $rz-timeline-line-position-offset; bottom: auto;}
+    }
+
+    &.rz-timeline-end,
+    &.rz-timeline-bottom {
+      .rz-timeline-item:before,
+      .rz-timeline-item:after {bottom: $rz-timeline-line-position-offset; top: auto;}
+    }
+
+    // LinePosition.Center
+    .rz-timeline-item {flex-direction: column; justify-content: end; width: 100%;}
+
+    // LinePosition.Alternate
+    &.rz-timeline-alternate {
+      .rz-timeline-item:nth-child(even) {flex-direction: column-reverse; justify-content: start;}
+    }
+
+    // LinePosition.Start/Top
+    &.rz-timeline-start:not(.rz-timeline-reverse),
+    &.rz-timeline-top:not(.rz-timeline-reverse) {
+      .rz-timeline-content-start {display: none;}
+      .rz-timeline-content-end {max-height: calc(100% - var(--rz-timeline-axis-size));}
+    }
+
+    // LinePosition.End/Bottom
+    &.rz-timeline-end:not(.rz-timeline-reverse),
+    &.rz-timeline-bottom:not(.rz-timeline-reverse) {
+      .rz-timeline-item {flex-direction: column-reverse;}
+      .rz-timeline-content-start {display: none;}
+      .rz-timeline-content-end {max-height: calc(100% - var(--rz-timeline-axis-size));}
+    }
+
+    // Orientation.Horizontal Reverse
+    &.rz-timeline-reverse {
+
+      // LinePosition.Center
+      .rz-timeline-item {flex-direction: column-reverse; justify-content: start;}
+
+      // LinePosition.Alternate
+      &.rz-timeline-alternate {
+        .rz-timeline-item:nth-child(even) {flex-direction: column; justify-content: end;}
+      }
+
+      // LinePosition.Start/Top
+      &.rz-timeline-start,
+      &.rz-timeline-top {
+        .rz-timeline-content-start {max-height: calc(100% - var(--rz-timeline-axis-size));}
+        .rz-timeline-content-end {display: none;}
+      }
+
+      // LinePosition.Start/Top
+      &.rz-timeline-end,
+      &.rz-timeline-bottom {
+        .rz-timeline-item {flex-direction: column;}
+        .rz-timeline-content-start {max-height: calc(100% - var(--rz-timeline-axis-size));}
+        .rz-timeline-content-end {display: none;}
+      }
+    }
+  }
+}
+
+.rz-timeline-item {
+  display: flex;
+  padding: var(--rz-timeline-item-padding);
+  position: relative;
+  // Where along the main axis the point's centre sits, and so where the line splits into its two
+  // halves. Only align-items start and end move it off centre; normal and stretch both stretch the
+  // axis to the item, which centres the point by construction.
+  --rz-timeline-point-offset: 50%;
+
+  .rz-timeline-align-items-center & {
+    align-items: center;
+  }
+
+  .rz-timeline-align-items-normal & {
+    align-items: normal;
+  }
+
+  .rz-timeline-align-items-start & {
+    align-items: start;
+    --rz-timeline-point-offset: #{$rz-timeline-point-offset-start};
+  }
+
+  .rz-timeline-align-items-end & {
+    align-items: end;
+    --rz-timeline-point-offset: #{$rz-timeline-point-offset-end};
+  }
+
+  .rz-timeline-align-items-stretch & {
+    align-items: stretch;
+  }
+
+  // Timeline Line
+  //
+  // Drawn as two halves that stop at the edge of the point: :before runs from the item's leading edge to
+  // the point, :after from the point to the trailing edge. A connector between two points is therefore
+  // the trailing half of one item plus the leading half of the next, and the two can be coloured together
+  // to style that connector on its own. The first item has no leading half and the last no trailing half,
+  // which is what stops the line short of the outer points.
+  //
+  // By default the halves meet under the centre of the point, so the line reads as continuous and a
+  // thick one can serve as a track behind the points. Set --rz-timeline-line-gap to hold them off the
+  // point instead - to the point's radius, say - which is what a tinted or translucent point needs,
+  // since it cannot hide the line the way the severity styles do.
+  &:before,
+  &:after {
+    content: '';
+    position: absolute;
+    background-color: var(--rz-timeline-line-color);
+  }
+
+  &:first-child:before,
+  &:last-child:after {
+    content: none;
+  }
+
+  .rz-timeline-column &:before,
+  .rz-timeline-column &:after {
+    width: var(--rz-timeline-line-width);
+    inset-inline-start: calc(50% - (var(--rz-timeline-line-width) / 2));
+    inset-inline-end: auto;
+  }
+
+  .rz-timeline-column &:before {
+    top: 0;
+    bottom: calc(100% - var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap));
+  }
+
+  .rz-timeline-column &:after {
+    top: calc(var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap));
+    bottom: 0;
+  }
+
+  .rz-timeline-column &:first-child:after {
+    top: calc(var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap) - (var(--rz-timeline-line-width) / 2));
+    border-top-left-radius: var(--rz-timeline-line-border-radius);
+    border-top-right-radius: var(--rz-timeline-line-border-radius);
+  }
+
+  .rz-timeline-column &:last-child:before {
+    bottom: calc(100% - var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap) - (var(--rz-timeline-line-width) / 2));
+    border-bottom-left-radius: var(--rz-timeline-line-border-radius);
+    border-bottom-right-radius: var(--rz-timeline-line-border-radius);
+  }
+
+  .rz-timeline-row &:before,
+  .rz-timeline-row &:after {
+    height: var(--rz-timeline-line-width);
+    top: calc(50% - (var(--rz-timeline-line-width) / 2));
+    bottom: auto;
+  }
+
+  .rz-timeline-row &:before {
+    inset-inline-start: 0;
+    inset-inline-end: calc(100% - var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap));
+  }
+
+  .rz-timeline-row &:after {
+    inset-inline-start: calc(var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap));
+    inset-inline-end: 0;
+  }
+
+  .rz-timeline-row &:first-child:after {
+    inset-inline-start: calc(var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap) - (var(--rz-timeline-line-width) / 2));
+    border-start-start-radius: var(--rz-timeline-line-border-radius);
+    border-end-start-radius: var(--rz-timeline-line-border-radius);
+  }
+
+  .rz-timeline-row &:last-child:before {
+    inset-inline-end: calc(100% - var(--rz-timeline-point-offset) + var(--rz-timeline-line-gap) - (var(--rz-timeline-line-width) / 2));
+    border-start-end-radius: var(--rz-timeline-line-border-radius);
+    border-end-end-radius: var(--rz-timeline-line-border-radius);
+  }
+}
+
+.rz-timeline-content-start {
+  text-align: center;
+
+  .rz-timeline-column & {
+    flex: 1 1 auto;
+    max-width: calc(50% - (var(--rz-timeline-axis-size) / 2));
+  }
+}
+
+.rz-timeline-content-end {
+  flex: 1 1 auto;
+  text-align: center;
+
+  .rz-timeline-column & {
+    max-width: calc(50% - (var(--rz-timeline-axis-size) / 2));
+  }
+
+  .rz-timeline-row & {
+    max-height: calc(50% - (var(--rz-timeline-axis-size) / 2));
+  }
+}
+
+// Timeline Point Wrapper
+.rz-timeline-axis {
+  position: relative;
+  // Both line halves are positioned and the trailing one follows the point in document order, so without
+  // this the line would paint over the ring a current point draws outside itself.
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 1 var(--rz-timeline-axis-size);
+
+  .rz-timeline-column & {
+    width: var(--rz-timeline-axis-size);
+  }
+
+  .rz-timeline-row & {
+    height: var(--rz-timeline-axis-size);
+  }
+}
+
+// Timeline Point
+.rz-timeline-point {
+  position: relative;
+  display: flex;
+  flex: 0 1 var(--rz-timeline-point-size);
+  align-items: center;
+  justify-content: center;
+  height: var(--rz-timeline-point-size);
+  width: var(--rz-timeline-point-size);
+  border: var(--rz-timeline-point-border);
+  border-radius: var(--rz-timeline-point-border-radius);
+  background-color: var(--rz-timeline-point-background-color);
+  color: var(--rz-timeline-point-color);
+}
+
+.rz-timeline-point-outlined {
+  background-color: var(--rz-base-background-color);
+  color: var(--rz-timeline-point-color);
+  border-color: var(--rz-timeline-point-background-color);
+}
+
+.rz-timeline-point-flat {
+  border: 0;
+}
+
+.rz-timeline-point-text {
+  background-color: var(--rz-base-background-color);
+  color: var(--rz-timeline-point-color);
+  border: 0;
+}
+
+@each $style, $rule in map.merge($severity-styles-map, $base-styles-map) {
+  .rz-timeline-point-#{$style} {
+    background-color: map.get($rule, background-color);
+    color: map.get($rule, color);
+  }
+
+  // A connector spans two items - the trailing half of the item that owns it and the leading half of
+  // the next one - so RadzenTimelineItem.LineStyle marks only the owner and the sibling combinator
+  // reaches the other half. A hidden item renders no element, so the connector spans across it.
+  .rz-timeline-line-#{$style}:after,
+  .rz-timeline-line-#{$style} + .rz-timeline-item:before {
+    background-color: map.get($rule, background-color);
+  }
+
+  $ring-color: map.get($rule, background-color);
+  @if map.has-key($timeline-point-ring-colors, $style) {
+    $ring-color: map.get($timeline-point-ring-colors, $style);
+  }
+
+  // The line runs under the point and is masked by it, so the ring has to be opaque to mask it too -
+  // a translucent one lets the connector show through. It is mixed into the same background the point
+  // border is drawn in, for the same reason. An outline rather than a box-shadow: every point carries
+  // an rz-shadow-* utility class, and those declare box-shadow with !important.
+  .rz-timeline-item-current .rz-timeline-point-#{$style} {
+    outline: var(--rz-timeline-point-ring-width) solid
+             color-mix(in srgb, #{$ring-color} var(--rz-timeline-point-ring-tint), var(--rz-base-background-color));
+  }
+
+  .rz-timeline-point-outlined.rz-timeline-point-#{$style} {
+    background-color: var(--rz-base-background-color);
+    color: map.get($rule, background-color);
+    border-color: map.get($rule, background-color);
+  }
+  .rz-timeline-point-text.rz-timeline-point-#{$style} {
+    background-color: var(--rz-base-background-color);
+    color: map.get($rule, background-color);
+  }
+}
+
+@each $size, $timeline-point in $timeline-point-sizes {
+  .rz-timeline-axis-#{$size} {
+    --rz-timeline-point-size: #{map.get($timeline-point, size)};
+    --rz-timeline-point-font-size: #{map.get($timeline-point, font-size)};
+  }
+}
+
+.rz-timeline-point .rzi {
+  font-size: var(--rz-timeline-point-font-size);
+}

@@ -1,0 +1,2974 @@
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Forms;
+using Microsoft.AspNetCore.Components.Web;
+using Microsoft.JSInterop;
+using Radzen.Blazor.Rendering;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Linq.Expressions;
+using System.Threading.Tasks;
+
+namespace Radzen.Blazor
+{
+    /// <summary>
+    /// A date and time picker component that provides a calendar popup for selecting dates and optional time selection.
+    /// RadzenDatePicker supports DateTime, DateTime?, DateTimeOffset, DateTimeOffset?, DateOnly, and DateOnly? types with extensive customization options.
+    /// Displays a text input with a calendar icon button. Clicking opens a popup calendar for date selection.
+    /// Optional time selection can be enabled via ShowTime property, supporting both 12-hour and 24-hour formats.
+    /// Supports features like min/max date constraints, disabled dates, initial view configuration, calendar week display,
+    /// inline calendar mode (always visible), time-only mode, multiple date selection, and culture-specific formatting.
+    /// </summary>
+    /// <typeparam name="TValue">The type of the date/time value. Supports DateTime, DateTime?, DateTimeOffset, DateTimeOffset?, DateOnly, and DateOnly?.</typeparam>
+    /// <example>
+    /// Basic date picker:
+    /// <code>
+    /// &lt;RadzenDatePicker @bind-Value=@birthDate TValue="DateTime" Placeholder="Select date" /&gt;
+    /// </code>
+    /// Date and time picker with 12-hour format:
+    /// <code>
+    /// &lt;RadzenDatePicker @bind-Value=@appointmentDate TValue="DateTime" ShowTime="true" TimeOnly="false" HoursStep="1" MinutesStep="15" /&gt;
+    /// </code>
+    /// Date picker with constraints:
+    /// <code>
+    /// &lt;RadzenDatePicker @bind-Value=@selectedDate TValue="DateTime" Min="@DateTime.Today" Max="@DateTime.Today.AddMonths(6)" /&gt;
+    /// </code>
+    /// </example>
+    public partial class RadzenDatePicker<TValue> : RadzenComponent, IRadzenFormComponent
+    {
+        /// <summary>
+        /// Gets or sets a value indicating whether the component should update its value on every input event
+        /// rather than waiting for the input to lose focus (onchange event).
+        /// When enabled, the bound value is updated as the user types, provided the input can be parsed as a valid date.
+        /// Invalid intermediate input is ignored to avoid clearing the value while the user is still typing.
+        /// </summary>
+        /// <value><c>true</c> for immediate updates; <c>false</c> for deferred updates. Default is <c>false</c>.</value>
+        [Parameter]
+        public bool Immediate { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether the calendar week number column should be displayed in the calendar popup.
+        /// When enabled, each week row shows its corresponding week number according to ISO 8601.
+        /// </summary>
+        /// <value><c>true</c> to show calendar week numbers; otherwise, <c>false</c>. Default is <c>false</c>.</value>
+        [Parameter]
+        public bool ShowCalendarWeek { get; set; }
+
+        /// <summary>
+        /// Gets or sets whether multiple dates can be selected.
+        /// When enabled, users can select multiple dates from the calendar, and the value will be a collection of DateTimes.
+        /// </summary>
+        /// <value><c>true</c> to enable multiple date selection; otherwise, <c>false</c>. Default is <c>false</c>.</value>
+        [Parameter]
+        public bool Multiple { get; set; }
+
+        // Holds selected dates when Multiple is true
+        List<DateTime> selectedDates = new List<DateTime>();
+
+        List<DateTime>? selectedDatesSetSource;
+        int selectedDatesSetCount = -1;
+        HashSet<DateTime>? selectedDatesSet;
+
+        // Membership test for the Multiple-mode calendar. Rendering a month calls this ~2x per day cell
+        // (aria-selected and the day css class); memoizing the selected days as a set keeps that O(1) per
+        // cell instead of a selectedDates.Any() scan. The cache is dropped on reassignment (reference
+        // check) and on any count-changing in-place edit (an automatic backstop); InvalidateSelectedDates
+        // also drops it explicitly at each mutation site to cover a hypothetical net-zero-count edit.
+        bool IsSelectedDate(DateTime date)
+        {
+            if (selectedDatesSet == null || !ReferenceEquals(selectedDatesSetSource, selectedDates) || selectedDatesSetCount != selectedDates.Count)
+            {
+                selectedDatesSetSource = selectedDates;
+                selectedDatesSetCount = selectedDates.Count;
+                selectedDatesSet = new HashSet<DateTime>(selectedDates.Count);
+                foreach (var d in selectedDates)
+                {
+                    selectedDatesSet.Add(d.Date);
+                }
+            }
+
+            return selectedDatesSet.Contains(date.Date);
+        }
+
+        // Invalidate the memoized set after an in-place edit of selectedDates (reassignments and
+        // count changes are already caught in IsSelectedDate; this also covers a net-zero-count edit).
+        void InvalidateSelectedDates() => selectedDatesSet = null;
+
+        internal virtual bool IsRange => false;
+
+        internal virtual string RangeSeparatorText => " - ";
+
+        internal virtual int MonthsToDisplay => 1;
+
+        internal IEnumerable<DateTime> VisibleMonths
+        {
+            get
+            {
+                var current = CurrentDate;
+
+                yield return current;
+
+                for (var i = 1; i < MonthsToDisplay; i++)
+                {
+                    DateTime next;
+
+                    try
+                    {
+                        next = Culture.Calendar.AddMonths(current, 1);
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                        yield break;
+                    }
+
+                    current = next;
+
+                    yield return current;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets how users change the displayed month and year in the calendar.
+        /// <see cref="DatePickerNavigationMode.DropDown" /> displays month and year drop-downs in the calendar header.
+        /// <see cref="DatePickerNavigationMode.DrillDown" /> makes the calendar title a button which drills up to a month grid and a year grid.
+        /// </summary>
+        /// <value>The navigation mode. Default is <see cref="DatePickerNavigationMode.DrillDown" />.</value>
+        [Parameter]
+        public DatePickerNavigationMode NavigationMode { get; set; } = DatePickerNavigationMode.DrillDown;
+
+        internal enum CalendarViewKind
+        {
+            Days,
+            Months,
+            Years
+        }
+
+        CalendarViewKind currentView = CalendarViewKind.Days;
+
+        internal CalendarViewKind CurrentView => currentView;
+
+        CalendarViewKind DefaultView => ShowDays || NavigationMode != DatePickerNavigationMode.DrillDown ? CalendarViewKind.Days : CalendarViewKind.Months;
+
+        const int YearsPerPage = 12;
+
+        int YearsPageStart
+        {
+            get
+            {
+                var year = GetCalendarYear(CurrentDate);
+
+                if (year < YearFrom)
+                {
+                    return YearFrom;
+                }
+
+                return YearFrom + (year - YearFrom) / YearsPerPage * YearsPerPage;
+            }
+        }
+
+        bool shouldFocusTitle;
+
+        internal void OnTitleClick()
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            if (currentView == CalendarViewKind.Days)
+            {
+                currentView = CalendarViewKind.Months;
+                shouldFocusTitle = MonthsToDisplay > 1;
+            }
+            else if (currentView == CalendarViewKind.Months)
+            {
+                currentView = CalendarViewKind.Years;
+            }
+        }
+
+        internal void SelectViewMonth(int calendarMonth)
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            SetMonth(calendarMonth);
+            MonthSelect.InvokeAsync(CurrentDate);
+
+            if (ShowDays)
+            {
+                currentView = CalendarViewKind.Days;
+                shouldFocusDay = true;
+            }
+            else
+            {
+                shouldFocusMonthCell = true;
+            }
+        }
+
+        internal void SelectViewYear(int calendarYear)
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            SetYear(calendarYear);
+            currentView = CalendarViewKind.Months;
+            shouldFocusTitle = true;
+        }
+
+        internal void NavigateView(int direction)
+        {
+            if (currentView == CalendarViewKind.Days)
+            {
+                NavigateMonth(direction);
+            }
+            else if (currentView == CalendarViewKind.Months)
+            {
+                NavigateYear(direction);
+            }
+            else
+            {
+                NavigateYearsPage(direction);
+            }
+        }
+
+        void NavigateYearsPage(int direction)
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            var year = GetCalendarYear(CurrentDate);
+            var target = Math.Min(Math.Max(year + direction * YearsPerPage, YearFrom), YearTo);
+
+            if (target != year)
+            {
+                SetYear(target);
+            }
+        }
+
+        internal string GetViewTitle()
+        {
+            var formatYear = YearFormatter ?? FormatYear;
+
+            if (currentView == CalendarViewKind.Months)
+            {
+                return formatYear(GetCalendarYear(CurrentDate));
+            }
+
+            if (currentView == CalendarViewKind.Years)
+            {
+                var start = YearsPageStart;
+                var end = Math.Min(start + YearsPerPage - 1, YearTo);
+
+                return start == end ? formatYear(start) : $"{formatYear(start)} - {formatYear(end)}";
+            }
+
+            return GetMonthTitle(CurrentDate);
+        }
+
+        internal bool IsMonthDisabled(int calendarMonth)
+        {
+            if (!Min.HasValue && !Max.HasValue)
+            {
+                return false;
+            }
+
+            var calendar = Culture.Calendar;
+            var calYear = GetCalendarYear(CurrentDate);
+            var first = new DateTime(calYear, calendarMonth, 1, calendar);
+            var last = first.AddDays(calendar.GetDaysInMonth(calYear, calendarMonth) - 1);
+
+            return (Min.HasValue && last < Min.Value.Date) || (Max.HasValue && first > Max.Value.Date);
+        }
+
+        internal IEnumerable<(string Name, int Value)> MonthsInView => months.Select(m => (m.Name ?? string.Empty, m.Value));
+
+        internal IEnumerable<(string Name, int Value)> YearsInView =>
+            years.Where(y => y.Value >= YearsPageStart && y.Value < YearsPageStart + YearsPerPage).Select(y => (y.Name ?? string.Empty, y.Value));
+
+        void ResetView()
+        {
+            currentView = DefaultView;
+        }
+
+        bool shouldFocusMonthCell;
+        bool shouldFocusYearCell;
+
+        // Tells a host that shows an inline picker in a popup that Escape was pressed, even in cells that stop the key from bubbling up.
+        internal Action? OnEscape { get; set; }
+
+        internal void FocusCalendar()
+        {
+            shouldFocusDay = currentView == CalendarViewKind.Days;
+            shouldFocusMonthCell = currentView == CalendarViewKind.Months;
+            shouldFocusYearCell = currentView == CalendarViewKind.Years;
+            StateHasChanged();
+        }
+
+        void OnMonthCellKeyDown(KeyboardEventArgs args)
+        {
+            var key = args.Code != null ? args.Code : args.Key;
+
+            if (key == "Escape")
+            {
+                OnEscape?.Invoke();
+            }
+
+            var delta = key switch
+            {
+                "ArrowLeft" => -1,
+                "ArrowRight" => 1,
+                "ArrowUp" => -3,
+                "ArrowDown" => 3,
+                _ => 0
+            };
+
+            if (delta != 0)
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+                NavigateMonth(delta);
+                shouldFocusMonthCell = true;
+                return;
+            }
+
+            if (key == "PageUp" || key == "PageDown")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+                NavigateYear(key == "PageUp" ? -1 : 1);
+                shouldFocusMonthCell = true;
+                return;
+            }
+
+            if (key == "Home" || key == "End")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+                SetMonth(key == "Home" ? 1 : Culture.Calendar.GetMonthsInYear(GetCalendarYear(CurrentDate)));
+                shouldFocusMonthCell = true;
+                return;
+            }
+
+            preventKeyPress = false;
+            stopKeydownPropagation = false;
+        }
+
+        void OnYearCellKeyDown(KeyboardEventArgs args)
+        {
+            var key = args.Code != null ? args.Code : args.Key;
+
+            if (key == "Escape")
+            {
+                OnEscape?.Invoke();
+            }
+
+            var delta = key switch
+            {
+                "ArrowLeft" => -1,
+                "ArrowRight" => 1,
+                "ArrowUp" => -3,
+                "ArrowDown" => 3,
+                _ => 0
+            };
+
+            if (delta != 0)
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+                NavigateYear(delta);
+                shouldFocusYearCell = true;
+                return;
+            }
+
+            if (key == "PageUp" || key == "PageDown")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+                NavigateYearsPage(key == "PageUp" ? -1 : 1);
+                shouldFocusYearCell = true;
+                return;
+            }
+
+            if (key == "Home" || key == "End")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                var target = key == "Home" ? YearsPageStart : Math.Min(YearsPageStart + YearsPerPage - 1, YearTo);
+
+                if (target != GetCalendarYear(CurrentDate))
+                {
+                    SetYear(target);
+                }
+
+                shouldFocusYearCell = true;
+                return;
+            }
+
+            preventKeyPress = false;
+            stopKeydownPropagation = false;
+        }
+
+        internal void NavigateMonth(int direction)
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            try
+            {
+                var next = Culture.Calendar.AddMonths(CurrentDate, direction);
+                var year = GetCalendarYear(next);
+
+                if (direction < 0 ? year >= YearFrom : year <= YearTo)
+                {
+                    CurrentDate = next;
+                }
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+            }
+        }
+
+        internal void NavigateYear(int direction)
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            try
+            {
+                var next = Culture.Calendar.AddYears(CurrentDate, direction);
+                var year = GetCalendarYear(next);
+
+                if (year >= YearFrom && year <= YearTo)
+                {
+                    CurrentDate = next;
+                }
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+            }
+        }
+
+        void EnsureMonthVisible(DateTime date)
+        {
+            if (MonthsToDisplay == 1)
+            {
+                CurrentDate = date;
+                return;
+            }
+
+            var calendar = Culture.Calendar;
+            var firstVisible = new DateTime(calendar.GetYear(CurrentDate), calendar.GetMonth(CurrentDate), 1, calendar);
+            var lastVisible = firstVisible;
+
+            try
+            {
+                lastVisible = calendar.AddMonths(firstVisible, MonthsToDisplay - 1);
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+            }
+
+            var target = new DateTime(calendar.GetYear(date), calendar.GetMonth(date), 1, calendar);
+
+            if (target < firstVisible)
+            {
+                CurrentDate = date;
+            }
+            else if (target > lastVisible)
+            {
+                try
+                {
+                    CurrentDate = calendar.AddMonths(date, -(MonthsToDisplay - 1));
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    CurrentDate = date;
+                }
+
+                FocusedDate = date;
+            }
+            else
+            {
+                FocusedDate = date;
+            }
+        }
+
+        DateTime? rangeStart;
+        DateTime? rangeEnd;
+        DateTime? rangeHoverEnd;
+
+        private string? calendarWeekTitle;
+
+        /// <summary>
+        /// Gets or sets the previous month aria label text.
+        /// </summary>
+        /// <value>The previous month aria label text.</value>
+        [Parameter]
+        public string CalendarWeekTitle { get => calendarWeekTitle ?? Localize(nameof(RadzenStrings.DatePicker_CalendarWeekTitle)); set => calendarWeekTitle = value; }
+
+        private string? toggleAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the toggle popup aria label text.
+        /// </summary>
+        /// <value>The toggle popup aria label text.</value>
+        [Parameter]
+        public string ToggleAriaLabel { get => toggleAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_ToggleAriaLabel)); set => toggleAriaLabel = value; }
+
+        private string? popupAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the popup aria label text.
+        /// </summary>
+        /// <value>The popup aria label text.</value>
+        [Parameter]
+        public string PopupAriaLabel { get => popupAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_PopupAriaLabel)); set => popupAriaLabel = value; }
+
+        private string? clearAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the clear button aria label text.
+        /// </summary>
+        /// <value>The clear button aria label text.</value>
+        [Parameter]
+        public string ClearAriaLabel { get => clearAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_ClearAriaLabel)); set => clearAriaLabel = value; }
+
+        private string? hourAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the hour input aria label text.
+        /// </summary>
+        /// <value>The hour input aria label text.</value>
+        [Parameter]
+        public string HourAriaLabel { get => hourAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_HourAriaLabel)); set => hourAriaLabel = value; }
+
+        private string? minutesAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the minutes input aria label text.
+        /// </summary>
+        /// <value>The minutes input aria label text.</value>
+        [Parameter]
+        public string MinutesAriaLabel { get => minutesAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_MinutesAriaLabel)); set => minutesAriaLabel = value; }
+
+        private string? secondsAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the seconds input aria label text.
+        /// </summary>
+        /// <value>The seconds input aria label text.</value>
+        [Parameter]
+        public string SecondsAriaLabel { get => secondsAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_SecondsAriaLabel)); set => secondsAriaLabel = value; }
+
+        private string? okAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the OK button aria label text.
+        /// </summary>
+        /// <value>The OK button aria label text.</value>
+        [Parameter]
+        public string OkAriaLabel { get => okAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_OkAriaLabel)); set => okAriaLabel = value; }
+
+        private string? prevMonthAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the previous month aria label text.
+        /// </summary>
+        /// <value>The previous month aria label text.</value>
+        [Parameter]
+        public string PrevMonthAriaLabel { get => prevMonthAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_PrevMonthAriaLabel)); set => prevMonthAriaLabel = value; }
+
+        private string? nextMonthAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the next month aria label text.
+        /// </summary>
+        /// <value>The next month aria label text.</value>
+        [Parameter]
+        public string NextMonthAriaLabel { get => nextMonthAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_NextMonthAriaLabel)); set => nextMonthAriaLabel = value; }
+
+        private string? prevYearAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the previous year aria label text.
+        /// </summary>
+        /// <value>The previous year aria label text.</value>
+        [Parameter]
+        public string PrevYearAriaLabel { get => prevYearAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_PrevYearAriaLabel)); set => prevYearAriaLabel = value; }
+
+        private string? nextYearAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the next year aria label text.
+        /// </summary>
+        /// <value>The next year aria label text.</value>
+        [Parameter]
+        public string NextYearAriaLabel { get => nextYearAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_NextYearAriaLabel)); set => nextYearAriaLabel = value; }
+
+        private string? toggleAmPmAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the toggle Am/Pm aria label text.
+        /// </summary>
+        /// <value>The toggle Am/Pm aria label text.</value>
+        [Parameter]
+        public string ToggleAmPmAriaLabel { get => toggleAmPmAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_ToggleAmPmAriaLabel)); set => toggleAmPmAriaLabel = value; }
+
+        private string? todayAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the suffix appended to a day cell's aria label when the date is today.
+        /// </summary>
+        [Parameter]
+        public string TodayAriaLabel { get => todayAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_TodayAriaLabel)); set => todayAriaLabel = value; }
+
+        private string? selectedAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the suffix appended to a day cell's aria label when the date is selected.
+        /// </summary>
+        [Parameter]
+        public string SelectedAriaLabel { get => selectedAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_SelectedAriaLabel)); set => selectedAriaLabel = value; }
+
+        private string? disabledAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the suffix appended to a day cell's aria label when the date is disabled.
+        /// </summary>
+        [Parameter]
+        public string DisabledAriaLabel { get => disabledAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_DisabledAriaLabel)); set => disabledAriaLabel = value; }
+
+        private string? rangeStartAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the suffix appended to a day cell's aria label when the date is the start of the selected range.
+        /// </summary>
+        [Parameter]
+        public string RangeStartAriaLabel { get => rangeStartAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_RangeStartAriaLabel)); set => rangeStartAriaLabel = value; }
+
+        private string? rangeEndAriaLabel;
+
+        /// <summary>
+        /// Gets or sets the suffix appended to a day cell's aria label when the date is the end of the selected range.
+        /// </summary>
+        [Parameter]
+        public string RangeEndAriaLabel { get => rangeEndAriaLabel ?? Localize(nameof(RadzenStrings.DatePicker_RangeEndAriaLabel)); set => rangeEndAriaLabel = value; }
+
+        /// <summary>
+        /// Specifies additional custom attributes that will be rendered by the input.
+        /// </summary>
+        /// <value>The attributes.</value>
+        [Parameter]
+        public IReadOnlyDictionary<string, object>? InputAttributes { get; set; }
+
+        RadzenDropDown<int>? monthDropDown;
+        RadzenDropDown<int>? yearDropDown;
+        RadzenNumeric<int>? hourNumeric;
+
+        bool shouldFocusDay;
+
+        internal string GetDayCellId(DateTime date)
+        {
+            return $"{GetId()}-day-{date:yyyy-MM-dd}";
+        }
+
+        internal bool IsDateSelected(DateTime date)
+        {
+            if (IsRange)
+            {
+                return IsRangeEndpoint(date) ||
+                    (rangeStart.HasValue && rangeEnd.HasValue && date.Date > rangeStart.Value.Date && date.Date < rangeEnd.Value.Date);
+            }
+
+            if (Multiple)
+            {
+                return IsSelectedDate(date);
+            }
+
+            return DateTimeValue.HasValue && DateTimeValue.Value.Date.CompareTo(date.Date) == 0;
+        }
+
+        internal bool IsRangeEndpoint(DateTime date)
+        {
+            return IsRange && (rangeStart?.Date == date.Date || rangeEnd?.Date == date.Date);
+        }
+
+        internal bool IsDateInRange(DateTime date)
+        {
+            if (!IsRange || !rangeStart.HasValue)
+            {
+                return false;
+            }
+
+            var end = rangeEnd ?? rangeHoverEnd;
+
+            return end.HasValue && date.Date > rangeStart.Value.Date && date.Date < end.Value.Date;
+        }
+
+        internal void OnDayMouseOver(DateTime date)
+        {
+            if (Disabled || !IsRange || !rangeStart.HasValue || rangeEnd.HasValue)
+            {
+                return;
+            }
+
+            rangeHoverEnd = date.Date > rangeStart.Value.Date ? date.Date : (DateTime?)null;
+        }
+
+        internal void OnCalendarMouseLeave()
+        {
+            rangeHoverEnd = null;
+        }
+
+        void SyncRangeHover(DateTime date)
+        {
+            if (IsRange && rangeStart.HasValue && !rangeEnd.HasValue)
+            {
+                rangeHoverEnd = date.Date > rangeStart.Value.Date ? date.Date : (DateTime?)null;
+            }
+        }
+
+        internal string GetCalendarAriaLabel()
+        {
+            return GetMonthTitle(CurrentDate);
+        }
+
+        internal string GetMonthTitle(DateTime month)
+        {
+            try
+            {
+                return month.ToString("Y", Culture);
+            }
+            catch
+            {
+                return month.ToString("Y", CultureInfo.InvariantCulture);
+            }
+        }
+
+        internal string GetDayAriaLabel(DateTime date, DateRenderEventArgs dateArgs)
+        {
+            string label;
+            try
+            {
+                label = date.ToString("D", Culture);
+            }
+            catch
+            {
+                label = date.ToString("D", CultureInfo.InvariantCulture);
+            }
+
+            var states = new List<string>();
+            if (DateTime.Now.Date == date.Date)
+            {
+                states.Add(TodayAriaLabel);
+            }
+            if (IsRange && rangeStart?.Date == date.Date)
+            {
+                states.Add(RangeStartAriaLabel);
+            }
+            if (IsRange && rangeEnd?.Date == date.Date)
+            {
+                states.Add(RangeEndAriaLabel);
+            }
+            if (IsDateSelected(date) && !IsRangeEndpoint(date))
+            {
+                states.Add(SelectedAriaLabel);
+            }
+            if (dateArgs.Disabled)
+            {
+                states.Add(DisabledAriaLabel);
+            }
+
+            return states.Count > 0 ? $"{label}, {string.Join(", ", states)}" : label;
+        }
+
+        async Task ToggleAmPm()
+        {
+            if (Disabled)
+            {
+                return;
+            }
+
+            var newHour = (CurrentDate.Hour + 12) % 24;
+
+            var newValue = new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, newHour, CurrentDate.Minute, CurrentDate.Second);
+
+            hour = newValue.Hour;
+            await UpdateValueFromTime(newValue);
+        }
+
+        int GetHour24FormatFrom12Format(int hour12)
+        {
+            hour12 = Math.Max(Math.Min(hour12, 12), 1);
+
+            return CurrentDate.Hour < 12 ?
+                (hour12 == 12 ? 0 : hour12) // AM
+                : (hour12 == 12 ? 12 : hour12 + 12); // PM
+        }
+
+        int? hour;
+
+        void OnUpdateHourInput(ChangeEventArgs args)
+        {
+            var value = $"{args.Value}";
+            if (string.IsNullOrWhiteSpace(value) || !int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v))
+            {
+                hour = null;
+                return;
+            }
+
+            hour = HourFormat == "12" ? GetHour24FormatFrom12Format(v) : Math.Max(Math.Min(v, 23), 0);
+        }
+
+        int? minutes;
+
+        void OnUpdateHourMinutes(ChangeEventArgs args)
+        {
+            var value = $"{args.Value}";
+            if (string.IsNullOrWhiteSpace(value) || !int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v))
+            {
+                minutes = null;
+                return;
+            }
+
+            minutes = Math.Max(Math.Min(v, 59), 0);
+        }
+
+        int? seconds;
+
+        void OnUpdateHourSeconds(ChangeEventArgs args)
+        {
+            var value = $"{args.Value}";
+            if (string.IsNullOrWhiteSpace(value) || !int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v))
+            {
+                seconds = null;
+                return;
+            }
+
+            seconds = Math.Max(Math.Min(v, 59), 0);
+        }
+
+        DateTime? _valueBeforeTimeEdit;
+        bool _hasUncommittedTimeChange;
+
+        DateTime ClampToMinMax(DateTime value)
+        {
+            if (Min.HasValue && value < Min.Value)
+            {
+                return Min.Value;
+            }
+
+            if (Max.HasValue && value > Max.Value)
+            {
+                return Max.Value;
+            }
+
+            return value;
+        }
+
+        async Task UpdateValueFromTime(DateTime newValue)
+        {
+            newValue = ClampToMinMax(newValue);
+
+            if (ShowTimeOkButton && !Immediate)
+            {
+                if (!_hasUncommittedTimeChange)
+                {
+                    _valueBeforeTimeEdit = _dateTimeValue;
+                    _hasUncommittedTimeChange = true;
+                }
+
+                DateTimeValue = newValue;
+                CurrentDate = newValue;
+            }
+            else
+            {
+                Value = newValue;
+                CurrentDate = newValue;
+                await OnChange();
+            }
+        }
+
+        void RevertUncommittedTimeChange()
+        {
+            if (!ShowTimeOkButton || !_hasUncommittedTimeChange)
+            {
+                return;
+            }
+
+            _hasUncommittedTimeChange = false;
+
+            if (_valueBeforeTimeEdit.HasValue)
+            {
+                _dateTimeValue = _valueBeforeTimeEdit;
+                _value = ConvertToTValue(_dateTimeValue);
+            }
+            else
+            {
+                _dateTimeValue = null;
+                _value = null;
+            }
+
+            _currentDate = default(DateTime);
+            hour = null;
+            minutes = null;
+            seconds = null;
+        }
+
+        /// <summary>
+        /// Called from JavaScript when the popup is closed (e.g. by clicking outside) in Initial render mode.
+        /// </summary>
+        [JSInvokable("OnPopupClose")]
+        public void OnPopupClose()
+        {
+            RevertUncommittedTimeChange();
+            ResetView();
+            contentStyle = "display:none;";
+            StateHasChanged();
+        }
+
+        void OnPopupCloseFromEvent()
+        {
+            RevertUncommittedTimeChange();
+            ResetView();
+            contentStyle = "display:none;";
+            StateHasChanged();
+        }
+
+        async Task UpdateHour(int v)
+        {
+            var newHour = HourFormat == "12" ? GetHour24FormatFrom12Format(v) : v;
+            var newMinute = CurrentDate.Minute;
+            var newSecond = CurrentDate.Second;
+
+            if (v < 0)
+            {
+                newHour = string.IsNullOrEmpty(HoursStep) ? 23 : 0;
+                newMinute = string.IsNullOrEmpty(MinutesStep) ? 59 : 0;
+                newSecond = string.IsNullOrEmpty(SecondsStep) ? 59 : 0;
+            }
+
+            var newValue = new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, newHour > 23 || newHour < 0 ? 0 : newHour, newMinute, newSecond);
+
+            hour = newValue.Hour;
+            await UpdateValueFromTime(newValue);
+        }
+
+        async Task UpdateMinutes(int v)
+        {
+            var newValue = new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, CurrentDate.Hour, v, CurrentDate.Second);
+
+            minutes = newValue.Minute;
+            await UpdateValueFromTime(newValue);
+        }
+
+        async Task UpdateSeconds(int v)
+        {
+            var newValue = new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, CurrentDate.Hour, CurrentDate.Minute, v);
+
+            seconds = newValue.Second;
+            await UpdateValueFromTime(newValue);
+        }
+
+        async Task OnOkClick(bool shouldClose = true, bool fromOkButton = false)
+        {
+            // Prevent single-value change path in Multiple mode
+            if (Multiple)
+            {
+                if (Min.HasValue && CurrentDate < Min.Value || Max.HasValue && CurrentDate > Max.Value)
+                {
+                    return;
+                }
+
+                if (!Disabled)
+                {
+                    // Use the currently selected date (with current time if shown) and update the multi-selection
+                    var date = new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, CurrentDate.Hour, CurrentDate.Minute, CurrentDate.Second);
+                    ToggleSelectedDate(date);
+                    await UpdateValueFromSelectedDates(date);
+                }
+
+                _hasUncommittedTimeChange = false;
+
+                if (shouldClose)
+                {
+                    Close();
+                }
+
+                if (fromOkButton && OkClick.HasDelegate)
+                {
+                    await OkClick.InvokeAsync(DateTimeValue);
+                }
+
+                return;
+            }
+
+            _hasUncommittedTimeChange = false;
+
+            if (shouldClose)
+            {
+                Close();
+            }
+
+            if(Min.HasValue && CurrentDate < Min.Value || Max.HasValue && CurrentDate > Max.Value)
+            {
+                return;
+            }
+
+            if (!Disabled)
+            {
+                DateTime date = CurrentDate;
+
+                if (CurrentDate.Hour != hour && hour != null)
+                {
+                    date = new DateTime(date.Year, date.Month, date.Day, hour.Value, date.Minute, date.Second);
+                }
+
+                if (CurrentDate.Minute != minutes && minutes != null)
+                {
+                    date = new DateTime(date.Year, date.Month, date.Day, date.Hour, minutes.Value, date.Second);
+                }
+
+                if (CurrentDate.Second != seconds && seconds != null)
+                {
+                    date = new DateTime(date.Year, date.Month, date.Day, date.Hour, date.Minute, seconds.Value);
+                }
+
+                Value = date;
+
+                await OnChange();
+
+                if (fromOkButton && OkClick.HasDelegate)
+                {
+                    await OkClick.InvokeAsync(DateTimeValue);
+                }
+
+                if (monthDropDown != null)
+                {
+                    await monthDropDown.PopupClose();
+                }
+
+                if (yearDropDown != null)
+                {
+                    await yearDropDown.PopupClose();
+                }
+            }
+        }
+
+        class NameValue
+        {
+            /// <summary>
+            /// Gets or sets the name.
+            /// </summary>
+            /// <value>The name.</value>
+            public string? Name { get; set; }
+            /// <summary>
+            /// Gets or sets the value.
+            /// </summary>
+            /// <value>The value.</value>
+            public int Value { get; set; }
+        }
+
+        IList<NameValue> months = new List<NameValue>();
+        IList<NameValue> years = new List<NameValue>();
+
+        int YearFrom { get; set; }
+        int YearTo { get; set; }
+
+        /// <inheritdoc />
+        protected override void OnInitialized()
+        {
+            base.OnInitialized();
+
+            YearFormatter = FormatYear;
+
+            UpdateYearsAndMonths(Min, Max);
+
+            if (typeof(TValue) == typeof(TimeOnly) || typeof(TValue) == typeof(TimeOnly?))
+            {
+                TimeOnly = true;
+                ShowTime = true;
+            }
+        }
+
+        void UpdateYearsAndMonths(DateTime? min, DateTime? max)
+        {
+            var calendar = Culture.Calendar;
+
+            if (min.HasValue)
+            {
+                YearFrom = calendar.GetYear(min.Value);
+            }
+            else
+            {
+                var gregorianYearFrom = int.Parse(YearRange.Split(':').First(), CultureInfo.InvariantCulture);
+                YearFrom = calendar.GetYear(new DateTime(Math.Max(gregorianYearFrom, calendar.MinSupportedDateTime.Year), 1, 1));
+            }
+
+            if (max.HasValue)
+            {
+                YearTo = calendar.GetYear(max.Value);
+            }
+            else
+            {
+                var gregorianYearTo = int.Parse(YearRange.Split(':').Last(), CultureInfo.InvariantCulture);
+                YearTo = calendar.GetYear(new DateTime(Math.Min(gregorianYearTo, calendar.MaxSupportedDateTime.Year), 1, 1));
+            }
+
+            var monthsInYear = calendar.GetMonthsInYear(calendar.GetYear(CurrentDate == default(DateTime) ? DateTime.Today : CurrentDate));
+            months = Enumerable.Range(1, monthsInYear).Select(i => new NameValue() { Name = Culture?.DateTimeFormat?.GetMonthName(i) ?? string.Empty, Value = i }).ToList();
+            years = YearFrom <= YearTo ? Enumerable.Range(YearFrom, YearTo - YearFrom + 1)
+                .Select(i => new NameValue() { Name = YearFormatter != null ? YearFormatter(i) : null, Value = i }).ToList() : Enumerable.Empty<NameValue>().ToList();
+        }
+
+        private int GetCalendarYear(DateTime date) => Culture.Calendar.GetYear(date);
+        private int GetCalendarMonth(DateTime date) => Culture.Calendar.GetMonth(date);
+        private int GetCalendarDayOfMonth(DateTime date) => Culture.Calendar.GetDayOfMonth(date);
+
+        private string FormatYear(int calendarYear)
+        {
+            var date = new DateTime(calendarYear, 1, 1, Culture.Calendar);
+
+            return date.ToString(YearFormat, Culture);
+        }
+
+        /// <summary>
+        /// Gets or sets the year formatter. Set to <c>FormatYear</c> by default.
+        /// If set, this function will take precedence over <see cref="YearFormat"/>.
+        /// </summary>
+        [Parameter]
+        public Func<int, string>? YearFormatter { get; set; }
+
+        /// <summary>
+        /// Gets ot sets the year format. Set to <c>yyyy</c> by default.
+        /// </summary>
+        [Parameter]
+        public string YearFormat { get; set; } = "yyyy";
+
+        /// <summary>
+        /// Gets or sets a value indicating whether value can be cleared.
+        /// </summary>
+        /// <value><c>true</c> if value can be cleared; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool AllowClear { get; set; }
+
+        /// <summary>
+        /// Gets or sets the tab index.
+        /// </summary>
+        /// <value>The tab index.</value>
+        [Parameter]
+        public int TabIndex { get; set; } = 0;
+
+        /// <summary>
+        /// Gets or sets the name of the form component.
+        /// </summary>
+        /// <value>The name.</value>
+        [Parameter]
+        public string? Name { get; set; }
+
+        /// <summary>
+        /// Gets or sets the input CSS class.
+        /// </summary>
+        /// <value>The input CSS class.</value>
+        [Parameter]
+        public string InputClass { get; set; } = string.Empty;
+        /// <summary>
+        /// Gets or sets the button CSS class.
+        /// </summary>
+        /// <value>The button CSS class.</value>
+        [Parameter]
+        public string ButtonClass { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the Minimum Selectable Date.
+        /// </summary>
+        /// <value>The Minimum Selectable Date.</value>
+        [Parameter]
+        public DateTime? Min { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Maximum Selectable Date.
+        /// </summary>
+        /// <value>The Maximum Selectable Date.</value>
+        [Parameter]
+        public DateTime? Max { get; set; }
+
+        /// <summary>
+        /// Gets or sets the Initial Date/Month View.
+        /// </summary>
+        /// <value>The Initial Date/Month View.</value>
+        [Parameter]
+        public DateTime? InitialViewDate { get; set; }
+
+        DateTime? _dateTimeValue;
+
+        DateTime? DateTimeValue
+        {
+            get
+            {
+                return _dateTimeValue;
+            }
+            set
+            {
+                if (_dateTimeValue != value)
+                {
+                    _dateTimeValue = value;
+                    Value = value;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets or sets the date render callback. Use it to set attributes.
+        /// </summary>
+        /// <value>The date render callback.</value>
+        [Parameter]
+        public Action<DateRenderEventArgs>? DateRender { get; set; }
+
+        DateRenderEventArgs DateAttributes(DateTime value)
+        {
+            bool disabled;
+
+            if (ShowTime)
+            {
+                disabled = (Min.HasValue && value.Date < Min.Value.Date) || (Max.HasValue && value.Date > Max.Value.Date);
+            }
+            else
+            {
+                disabled = (Min.HasValue && value < Min.Value) || (Max.HasValue && value > Max.Value);
+            }
+
+            var args = new DateRenderEventArgs() { Date = value, Disabled = disabled };
+
+            if (DateRender != null)
+            {
+                DateRender(args);
+            }
+
+            return args;
+        }
+
+        async Task OnDayKeyDown(KeyboardEventArgs args, DateTime date, DateRenderEventArgs dateArgs)
+        {
+            var key = args.Code != null ? args.Code : args.Key;
+
+            if (key == "ArrowLeft" || key == "ArrowRight" || key == "ArrowUp" || key == "ArrowDown")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                var delta = key switch
+                {
+                    "ArrowLeft" => -1,
+                    "ArrowRight" => 1,
+                    "ArrowUp" => -7,
+                    "ArrowDown" => 7,
+                    _ => 0
+                };
+
+                var newDate = FocusedDate.AddDays(delta);
+                EnsureMonthVisible(newDate);
+                SyncRangeHover(newDate);
+                shouldFocusDay = true;
+                return;
+            }
+
+            if (key == "Home" || key == "End")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                var weekDelta = key == "Home"
+                    ? -((7 + (int)FocusedDate.DayOfWeek - (int)Culture.DateTimeFormat.FirstDayOfWeek) % 7)
+                    : 6 - ((7 + (int)FocusedDate.DayOfWeek - (int)Culture.DateTimeFormat.FirstDayOfWeek) % 7);
+
+                var newDate = FocusedDate.AddDays(weekDelta);
+                EnsureMonthVisible(newDate);
+                SyncRangeHover(newDate);
+                shouldFocusDay = true;
+                return;
+            }
+
+            if (key == "PageUp" || key == "PageDown")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                try
+                {
+                    var newDate = args.ShiftKey
+                        ? Culture.Calendar.AddYears(FocusedDate, key == "PageUp" ? -1 : 1)
+                        : Culture.Calendar.AddMonths(FocusedDate, key == "PageUp" ? -1 : 1);
+                    EnsureMonthVisible(newDate);
+                    SyncRangeHover(newDate);
+                    shouldFocusDay = true;
+                }
+                catch (ArgumentOutOfRangeException) { }
+
+                return;
+            }
+
+            if (key == "Escape")
+            {
+                preventKeyPress = false;
+                stopKeydownPropagation = false;
+
+                OnEscape?.Invoke();
+                await ClosePopup();
+                await FocusAsync();
+                return;
+            }
+
+            if (key == "Tab" && !ShowTime)
+            {
+                preventKeyPress = false;
+                stopKeydownPropagation = false;
+
+                await ClosePopup();
+                await FocusAsync();
+                return;
+            }
+
+            if ((key == "Enter" || key == "Space") && !Disabled && !dateArgs.Disabled)
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                if (ShowTime && !Multiple && !IsRange)
+                {
+                    // Apply the date part, keep the popup open, move focus to the hour input.
+                    CurrentDate = ClampToMinMax(new DateTime(date.Year, date.Month, date.Day, CurrentDate.Hour, CurrentDate.Minute, CurrentDate.Second));
+                    FocusedDate = CurrentDate;
+                    StateHasChanged();
+
+                    if (hourNumeric != null)
+                    {
+                        await hourNumeric.FocusAsync();
+                    }
+
+                    return;
+                }
+
+                await SetDay(date);
+                return;
+            }
+
+            preventKeyPress = false;
+            stopKeydownPropagation = false;
+        }
+
+        /// <summary>
+        /// Gets or sets the kind of DateTime bind to control
+        /// </summary>
+        [Parameter]
+        public DateTimeKind Kind { get; set; } = DateTimeKind.Unspecified;
+
+        object? _value;
+        TimeSpan? dateTimeOffsetValueOffset;
+
+        /// <summary>
+        /// Gets or sets the value.
+        /// </summary>
+        /// <value>The value.</value>
+        [Parameter]
+        public object? Value
+        {
+            get
+            {
+                return _value;
+            }
+            set
+            {
+                if (!EqualityComparer<object>.Default.Equals(value, _value))
+                {
+                    _currentDate = default(DateTime);
+                    hour = null;
+                    minutes = null;
+                    seconds = null;
+
+                    if (IsRange)
+                    {
+                        if (value is DateRange range)
+                        {
+                            var start = range.Start.HasValue ? DateTime.SpecifyKind(range.Start.Value.Date, Kind) : (DateTime?)null;
+                            var end = range.End.HasValue ? DateTime.SpecifyKind(range.End.Value.Date, Kind) : (DateTime?)null;
+
+                            if (start.HasValue && end.HasValue && end < start)
+                            {
+                                (start, end) = (end, start);
+                            }
+
+                            rangeStart = start;
+                            rangeEnd = end;
+                            _value = range;
+                            _dateTimeValue = start ?? end;
+                        }
+                        else
+                        {
+                            rangeStart = null;
+                            rangeEnd = null;
+                            _value = null;
+                            _dateTimeValue = null;
+                        }
+                    }
+                    else if (Multiple)
+                    {
+                        if (value == null)
+                        {
+                            selectedDates.Clear();
+                            InvalidateSelectedDates();
+                            _value = null;
+                            _dateTimeValue = null;
+                        }
+                        else if (value is IEnumerable<DateTime> dtEnum)
+                        {
+                            selectedDates = dtEnum.Where(d => d != default(DateTime) && d != DateTime.MaxValue)
+                                .Select(d => DateTime.SpecifyKind(d.Date, Kind))
+                                .Distinct()
+                                .OrderBy(d => d)
+                                .ToList();
+                            _value = dtEnum;
+                            _dateTimeValue = selectedDates.LastOrDefault();
+                        }
+                        else if (value is IEnumerable<DateTime?> ndtEnum)
+                        {
+                            selectedDates = ndtEnum.Where(d => d.HasValue && d.Value != default(DateTime) && d.Value != DateTime.MaxValue)
+                                .Select(d => DateTime.SpecifyKind(d!.Value.Date, Kind))
+                                .Distinct()
+                                .OrderBy(d => d)
+                                .ToList();
+                            _value = ndtEnum;
+                            _dateTimeValue = selectedDates.LastOrDefault();
+                        }
+                        else if (value is IEnumerable<DateOnly> doEnum)
+                        {
+                            selectedDates = doEnum.Select(d => d.ToDateTime(System.TimeOnly.MinValue, Kind).Date)
+                                .Distinct()
+                                .OrderBy(d => d)
+                                .ToList();
+                            _value = doEnum;
+                            _dateTimeValue = selectedDates.LastOrDefault();
+                        }
+                        else if (value is IEnumerable<DateTimeOffset?> dtoEnum)
+                        {
+                            selectedDates = dtoEnum.Where(o => o.HasValue)
+                                .Select(o =>
+                                {
+                                    var offset = o!.Value;
+                                    if (offset.Offset == TimeSpan.Zero && Kind == DateTimeKind.Local)
+                                    {
+                                        return offset.LocalDateTime.Date;
+                                    }
+                                    else if (offset.Offset != TimeSpan.Zero && Kind == DateTimeKind.Utc)
+                                    {
+                                        return offset.UtcDateTime.Date;
+                                    }
+                                    else
+                                    {
+                                        return DateTime.SpecifyKind(offset.DateTime, Kind).Date;
+                                    }
+                                })
+                                .Distinct()
+                                .OrderBy(d => d)
+                                .ToList();
+                            _value = dtoEnum;
+                            _dateTimeValue = selectedDates.LastOrDefault();
+                        }
+                        else if (value is IEnumerable<DateOnly?> doNullableEnum)
+                        {
+                            selectedDates = doNullableEnum.Where(d => d.HasValue)
+                                .Select(d => d!.Value.ToDateTime(System.TimeOnly.MinValue, Kind).Date)
+                                .Distinct()
+                                .OrderBy(d => d)
+                                .ToList();
+                            _value = doNullableEnum;
+                            _dateTimeValue = selectedDates.LastOrDefault();
+                        }
+                        else if (value is IEnumerable<TimeOnly?> toNullableEnum)
+                        {
+                            // Map times to dates using CurrentDate's date component
+                            var baseDate = CurrentDate == default(DateTime) ? DateTime.Today : CurrentDate.Date;
+                            selectedDates = toNullableEnum.Where(t => t.HasValue)
+                                .Select(t => new DateTime(baseDate.Year, baseDate.Month, baseDate.Day, t!.Value.Hour, t.Value.Minute, t.Value.Second, t.Value.Millisecond, Kind).Date)
+                                .Distinct()
+                                .OrderBy(d => d)
+                                .ToList();
+                            _value = toNullableEnum;
+                            _dateTimeValue = selectedDates.LastOrDefault();
+                        }
+                        else if (value is DateTime dt && dt != default(DateTime) && dt != DateTime.MaxValue)
+                        {
+                            selectedDates = new List<DateTime> { DateTime.SpecifyKind(dt.Date, Kind) };
+                            _value = selectedDates;
+                            _dateTimeValue = dt;
+                        }
+                        else
+                        {
+                            selectedDates.Clear();
+                            InvalidateSelectedDates();
+                            _value = null;
+                            _dateTimeValue = null;
+                        }
+                    }
+                    else
+                    {
+                        _value = ConvertToTValue(value);
+
+                        if (value is DateTimeOffset offset)
+                        {
+                            dateTimeOffsetValueOffset = offset.Offset;
+                            if (offset.Offset == TimeSpan.Zero && Kind == DateTimeKind.Local)
+                            {
+                                _dateTimeValue = offset.LocalDateTime;
+                            }
+                            else if (offset.Offset != TimeSpan.Zero && Kind == DateTimeKind.Utc)
+                            {
+                                _dateTimeValue = offset.UtcDateTime;
+                            }
+                            else
+                            {
+                                _dateTimeValue = DateTime.SpecifyKind(offset.DateTime, Kind);
+                            }
+
+                            _value = _dateTimeValue;
+                        }
+                        else
+                        {
+                            if (value is DateTime dateTime && dateTime != default(DateTime) && dateTime != DateTime.MaxValue)
+                            {
+                                _dateTimeValue = DateTime.SpecifyKind(dateTime, Kind);
+                            }
+                            else if (value is DateOnly dateOnly)
+                            {
+                                _dateTimeValue = dateOnly.ToDateTime(System.TimeOnly.MinValue, Kind);
+                            }
+                            else if (value is TimeOnly timeOnly)
+                            {
+                                _dateTimeValue = new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, timeOnly.Hour, timeOnly.Minute, timeOnly.Second, timeOnly.Millisecond, Kind);
+                                _currentDate = _dateTimeValue.Value;
+                            }
+                            else
+                            {
+                                _dateTimeValue = null;
+                            }
+
+                            _value = ConvertToTValue(_dateTimeValue);
+                        }
+                    }
+                }
+            }
+        }
+
+        private static object? ConvertToTValue(object? value)
+        {
+            var typeofTValue = typeof(TValue);
+            if (value is DateTime dt)
+            {
+                if (typeofTValue == typeof(DateOnly) || typeofTValue == typeof(DateOnly?))
+                {
+                    value = DateOnly.FromDateTime(dt);
+                    return (TValue)value;
+                }
+                if (typeofTValue == typeof(TimeOnly) || typeofTValue == typeof(TimeOnly?))
+                {
+                    value = System.TimeOnly.FromDateTime(dt);
+                    return (TValue)value;
+                }
+            }
+            return value;
+        }
+
+        DateTime _currentDate;
+
+        private DateTime CurrentDate
+        {
+            get
+            {
+                if (_currentDate == default(DateTime))
+                {
+                    _currentDate = HasValue ? DateTimeValue!.Value : InitialViewDate ?? DateTime.Today;
+                    FocusedDate = _currentDate;
+                }
+                return _currentDate;
+            }
+            set
+            {
+                _currentDate = value;
+                FocusedDate = value;
+                CurrentDateChanged.InvokeAsync(value);
+            }
+        }
+
+        /// <summary>
+        /// Gets or set the current date changed callback.
+        /// </summary>
+        [Parameter]
+        public EventCallback<DateTime> CurrentDateChanged { get; set; }
+
+        /// <summary>
+        /// Gets or sets the callback invoked when the user picks a month in the month grid, by click or keyboard.
+        /// It is not invoked when the displayed month changes by navigation, for example with the arrow keys.
+        /// </summary>
+        [Parameter]
+        public EventCallback<DateTime> MonthSelect { get; set; }
+
+        private DateTime StartDate => GetStartDate(CurrentDate);
+
+        private DateTime GetStartDate(DateTime month)
+        {
+            if (month == DateTime.MinValue)
+            {
+                return DateTime.MinValue;
+            }
+
+            var calendar = Culture.Calendar;
+            var calYear = calendar.GetYear(month);
+            var calMonth = calendar.GetMonth(month);
+            var firstDayOfTheMonth = new DateTime(calYear, calMonth, 1, calendar);
+
+            if (firstDayOfTheMonth == DateTime.MinValue)
+            {
+                return DateTime.MinValue;
+            }
+
+            int diff = (7 + (firstDayOfTheMonth.DayOfWeek - Culture.DateTimeFormat.FirstDayOfWeek)) % 7;
+            return firstDayOfTheMonth.AddDays(-1 * diff).Date;
+        }
+
+        IEnumerable<string> ShiftedAbbreviatedDayNames
+        {
+            get
+            {
+                for (int current = (int)Culture.DateTimeFormat.FirstDayOfWeek, to = current + 7; current < to; current++)
+                {
+                    yield return Culture.DateTimeFormat.AbbreviatedDayNames[current % 7];
+                }
+            }
+        }
+
+        IEnumerable<(string Abbreviated, string Full)> ShiftedDayNames
+        {
+            get
+            {
+                for (int current = (int)Culture.DateTimeFormat.FirstDayOfWeek, to = current + 7; current < to; current++)
+                {
+                    yield return (Culture.DateTimeFormat.AbbreviatedDayNames[current % 7], Culture.DateTimeFormat.DayNames[current % 7]);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether this instance is bound (ValueChanged callback has delegate).
+        /// </summary>
+        /// <value><c>true</c> if this instance is bound; otherwise, <c>false</c>.</value>
+        public bool IsBound
+        {
+            get
+            {
+                return ValueChanged.HasDelegate;
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether this instance has value.
+        /// </summary>
+        /// <value><c>true</c> if this instance has value; otherwise, <c>false</c>.</value>
+        public bool HasValue
+        {
+            get
+            {
+                return IsRange ? rangeStart.HasValue || rangeEnd.HasValue :
+                    Multiple ? selectedDates.Count > 0 : (DateTimeValue.HasValue && DateTimeValue != default(DateTime) && DateTimeValue != DateTime.MaxValue);
+            }
+        }
+
+        /// <summary>
+        /// Gets the formatted value.
+        /// </summary>
+        /// <value>The formatted value.</value>
+        public string FormattedValue
+        {
+            get
+            {
+                if (!HasValue)
+                {
+                    return "";
+                }
+
+                if (IsRange)
+                {
+                    var format = string.IsNullOrEmpty(DateFormat) ? "d" : DateFormat;
+                    var startText = rangeStart?.ToString(format, Culture);
+                    var endText = rangeEnd?.ToString(format, Culture);
+
+                    return startText != null && endText != null ? $"{startText}{RangeSeparatorText}{endText}" : startText ?? endText ?? "";
+                }
+
+                if (Multiple)
+                {
+                    var format = string.IsNullOrEmpty(DateFormat) ? "d" : DateFormat;
+                    return string.Join(", ", selectedDates.Select(d => d.ToString(format, Culture)));
+                }
+
+                return HasValue ? string.Format(Culture, "{0:" + DateFormat + "}", Value) : "";
+            }
+        }
+
+        IRadzenForm? _form;
+
+        /// <summary>
+        /// Gets or sets the form.
+        /// </summary>
+        /// <value>The form.</value>
+        [CascadingParameter]
+        public IRadzenForm? Form
+        {
+            get
+            {
+                return _form;
+            }
+            set
+            {
+                if (_form != value && value != null)
+                {
+                    _form = value;
+                    _form.AddComponent(this);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Gets input reference.
+        /// </summary>
+        protected ElementReference input;
+
+        /// <summary>
+        /// Parses the date.
+        /// </summary>
+        protected async Task ParseDate()
+        {
+            if (JSRuntime == null)
+            {
+                return;
+            }
+
+            var inputValue = await JSRuntime.InvokeAsync<string>("Radzen.getInputValue", input);
+            await ParseDate(inputValue);
+        }
+
+        private Task OnInputChange(ChangeEventArgs args)
+        {
+            return ParseDate(args?.Value?.ToString() ?? string.Empty);
+        }
+
+        private async Task ParseDate(string inputValue)
+        {
+            var wasTyping = immediateText != null;
+            immediateText = null;
+
+            if (IsRange)
+            {
+                if (TryParseRangeInput(inputValue, out var start, out var end)
+                    && (!start.HasValue || !DateAttributes(start.Value).Disabled)
+                    && (!end.HasValue || !DateAttributes(end.Value).Disabled))
+                {
+                    rangeStart = start.HasValue ? DateTime.SpecifyKind(start.Value, Kind) : (DateTime?)null;
+                    rangeEnd = end.HasValue ? DateTime.SpecifyKind(end.Value, Kind) : (DateTime?)null;
+                    rangeHoverEnd = null;
+                    await UpdateValueFromRange();
+                }
+                else
+                {
+                    if (JSRuntime != null)
+                    {
+                        await JSRuntime.InvokeAsync<string>("Radzen.setInputValue", input, FormattedValue);
+                    }
+                }
+
+                return;
+            }
+
+            DateTime? newValue;
+            bool valid = TryParseInput(inputValue, out DateTime value);
+
+            var nullable = Nullable.GetUnderlyingType(typeof(TValue)) != null || AllowClear;
+            string? inputValueToSet = null;
+
+            if (valid && !DateAttributes(value).Disabled)
+            {
+                newValue = TimeOnly && CurrentDate != default(DateTime) ? new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, value.Hour, value.Minute, value.Second) : value;
+            }
+            else
+            {
+                newValue = null;
+
+                if (nullable)
+                {
+                    inputValueToSet = string.Empty;
+                }
+                else
+                {
+                    inputValueToSet = FormattedValue;
+                }
+
+            }
+
+            if (Multiple)
+            {
+                if (valid)
+                {
+                    selectedDates = new List<DateTime>() { value.Date };
+                    await UpdateValueFromSelectedDates(value.Date);
+                }
+                else if (nullable)
+                {
+                    selectedDates.Clear();
+                    InvalidateSelectedDates();
+                    await UpdateValueFromSelectedDates(null);
+                }
+            }
+            else if (DateTimeValue != newValue && (newValue != null || nullable))
+            {
+                DateTimeValue = newValue;
+                if ((typeof(TValue) == typeof(DateTimeOffset) || typeof(TValue) == typeof(DateTimeOffset?)) && Value != null)
+                {
+                    DateTimeOffset? offset = DateTime.SpecifyKind((DateTime)Value, Kind);
+                    await ValueChanged.InvokeAsync((TValue)(object)offset);
+                }
+                else if ((typeof(TValue) == typeof(DateTime) || typeof(TValue) == typeof(DateTime?)) && Value != null)
+                {
+                    await ValueChanged.InvokeAsync((TValue)(object)DateTime.SpecifyKind((DateTime)Value, Kind));
+                }
+                else
+                {
+                    await ValueChanged.InvokeAsync(Value == null ? default(TValue) : (TValue)Value);
+                }
+
+                if (FieldIdentifier.FieldName != null)
+                {
+                    EditContext?.NotifyFieldChanged(FieldIdentifier);
+                }
+
+                await Change.InvokeAsync(DateTimeValue);
+                StateHasChanged();
+            }
+
+            if (inputValueToSet != null && JSRuntime != null)
+            {
+                await JSRuntime.InvokeAsync<string>("Radzen.setInputValue", input, inputValueToSet);
+            }
+            else if (wasTyping)
+            {
+                StateHasChanged();
+            }
+        }
+
+        /// <summary>
+        /// Parses the date on input. Ignores invalid intermediate input to avoid clearing the value while the user is typing.
+        /// </summary>
+        protected async Task ParseDateImmediate()
+        {
+            if (JSRuntime == null)
+            {
+                return;
+            }
+
+            var inputValue = await JSRuntime.InvokeAsync<string>("Radzen.getInputValue", input);
+            await ParseDateImmediate(inputValue);
+        }
+
+        private Task OnInputImmediate(ChangeEventArgs args)
+        {
+            return ParseDateImmediate(args?.Value?.ToString() ?? string.Empty);
+        }
+
+        string? immediateText;
+
+        private async Task ParseDateImmediate(string inputValue)
+        {
+            immediateText = inputValue;
+
+            if (IsRange)
+            {
+                if (TryParseRangeInput(inputValue, out var start, out var end)
+                    && (start.HasValue || end.HasValue)
+                    && (!start.HasValue || !DateAttributes(start.Value).Disabled)
+                    && (!end.HasValue || !DateAttributes(end.Value).Disabled))
+                {
+                    rangeStart = start.HasValue ? DateTime.SpecifyKind(start.Value, Kind) : (DateTime?)null;
+                    rangeEnd = end.HasValue ? DateTime.SpecifyKind(end.Value, Kind) : (DateTime?)null;
+                    rangeHoverEnd = null;
+                    await UpdateValueFromRange();
+                }
+
+                return;
+            }
+
+            bool valid = TryParseInput(inputValue, out DateTime value);
+
+            if (!valid || DateAttributes(value).Disabled)
+            {
+                return;
+            }
+
+            DateTime? newValue = TimeOnly && CurrentDate != default(DateTime)
+                ? new DateTime(CurrentDate.Year, CurrentDate.Month, CurrentDate.Day, value.Hour, value.Minute, value.Second)
+                : value;
+
+            if (Multiple)
+            {
+                selectedDates = new List<DateTime>() { value.Date };
+                await UpdateValueFromSelectedDates(value.Date);
+            }
+            else if (DateTimeValue != newValue)
+            {
+                DateTimeValue = newValue;
+                if ((typeof(TValue) == typeof(DateTimeOffset) || typeof(TValue) == typeof(DateTimeOffset?)) && Value != null)
+                {
+                    DateTimeOffset? offset = DateTime.SpecifyKind((DateTime)Value, Kind);
+                    await ValueChanged.InvokeAsync((TValue)(object)offset);
+                }
+                else if ((typeof(TValue) == typeof(DateTime) || typeof(TValue) == typeof(DateTime?)) && Value != null)
+                {
+                    await ValueChanged.InvokeAsync((TValue)(object)DateTime.SpecifyKind((DateTime)Value, Kind));
+                }
+                else
+                {
+                    await ValueChanged.InvokeAsync(Value == null ? default(TValue) : (TValue)Value);
+                }
+
+                if (FieldIdentifier.FieldName != null)
+                {
+                    EditContext?.NotifyFieldChanged(FieldIdentifier);
+                }
+
+                await Change.InvokeAsync(DateTimeValue);
+                StateHasChanged();
+            }
+        }
+
+        /// <summary>
+        /// Parse the input using an function outside the Radzen-library
+        /// </summary>
+        [Parameter]
+        public Func<string, DateTime?>? ParseInput { get; set; }
+
+        bool TryParseRangeInput(string inputValue, out DateTime? start, out DateTime? end)
+        {
+            start = null;
+            end = null;
+
+            if (string.IsNullOrWhiteSpace(inputValue))
+            {
+                return true;
+            }
+
+            string first;
+            string? second = null;
+            var separatorIndex = inputValue.IndexOf(RangeSeparatorText, StringComparison.Ordinal);
+
+            if (separatorIndex >= 0)
+            {
+                first = inputValue.Substring(0, separatorIndex);
+                second = inputValue.Substring(separatorIndex + RangeSeparatorText.Length);
+            }
+            else
+            {
+                first = inputValue;
+            }
+
+            if (!TryParseInput(first.Trim(), out var startValue))
+            {
+                return false;
+            }
+
+            start = startValue.Date;
+
+            if (!string.IsNullOrWhiteSpace(second))
+            {
+                if (!TryParseInput(second.Trim(), out var endValue))
+                {
+                    return false;
+                }
+
+                end = endValue.Date;
+
+                if (end < start)
+                {
+                    (start, end) = (end, start);
+                }
+            }
+
+            return true;
+        }
+
+        private bool TryParseInput(string inputValue, out DateTime value)
+        {
+            value = DateTime.MinValue;
+            bool valid = false;
+
+            if (ParseInput != null)
+            {
+                DateTime? custom = ParseInput.Invoke(inputValue);
+
+                if (custom.HasValue)
+                {
+                    valid = true;
+                    value = custom.Value;
+                }
+            }
+            else
+            {
+                valid = DateTime.TryParseExact(inputValue, DateFormat, Culture, DateTimeStyles.None, out value);
+
+                if (!valid)
+                {
+                    valid = DateTime.TryParse(inputValue, Culture, DateTimeStyles.None, out value);
+                }
+            }
+
+            return valid;
+        }
+
+        async Task Clear()
+        {
+            if (Disabled || ReadOnly)
+            {
+                return;
+            }
+
+            immediateText = null;
+
+            if (Multiple)
+            {
+                selectedDates.Clear();
+                InvalidateSelectedDates();
+                _value = null;
+                _dateTimeValue = null;
+
+                await ValueChanged.InvokeAsync(default(TValue));
+
+                if (FieldIdentifier.FieldName != null)
+                {
+                    EditContext?.NotifyFieldChanged(FieldIdentifier);
+                }
+
+                await Change.InvokeAsync(null);
+                StateHasChanged();
+            }
+            else
+            {
+                Value = null;
+
+                await ValueChanged.InvokeAsync(default(TValue));
+
+                if (FieldIdentifier.FieldName != null)
+                {
+                    EditContext?.NotifyFieldChanged(FieldIdentifier);
+                }
+
+                await Change.InvokeAsync(DateTimeValue);
+                StateHasChanged();
+            }
+        }
+
+        private string ButtonClasses
+        {
+            get => $"notranslate rz-button-icon-left rzi rzi-{(TimeOnly ? "time" : "calendar")}";
+        }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether this <see cref="RadzenDatePicker{TValue}"/> is inline - only Calender.
+        /// </summary>
+        /// <value><c>true</c> if inline; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool Inline { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether time only can be set.
+        /// </summary>
+        /// <value><c>true</c> if time only can be set; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool TimeOnly { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether read only.
+        /// </summary>
+        /// <value><c>true</c> if read only; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ReadOnly { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether input is allowed.
+        /// </summary>
+        /// <value><c>true</c> if input is allowed; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool AllowInput { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether popup datepicker button is shown.
+        /// </summary>
+        /// <value><c>true</c> if need show button open datepicker popup; <c>false</c> if need hide button, click for input field open datepicker popup.</value>
+        [Parameter]
+        public bool ShowButton { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the input box is shown. Ignored if ShowButton is false.
+        /// </summary>
+        /// <value><c>true</c> to show the input box; <c>false</c> to hide the input box.</value>
+        [Parameter]
+        public bool ShowInput { get; set; } = true;
+
+        private bool IsReadonly => ReadOnly || !AllowInput;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether this <see cref="RadzenDatePicker{TValue}"/> is disabled.
+        /// </summary>
+        /// <value><c>true</c> if disabled; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool Disabled { get; set; }
+
+        /// <summary>
+        /// Gets or sets the FormFieldContext of the component
+        /// </summary>
+        [CascadingParameter]
+        public IFormFieldContext? FormFieldContext { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether days part is shown. When <c>false</c> and <see cref="NavigationMode" /> is
+        /// <see cref="DatePickerNavigationMode.DrillDown" /> the calendar opens in the month grid, the title drills up to the year grid
+        /// and picking a month updates <see cref="CurrentDateChanged" /> without leaving the month grid.
+        /// </summary>
+        /// <value><c>true</c> if days part is shown; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ShowDays { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether time part is shown.
+        /// </summary>
+        /// <value><c>true</c> if time part is shown; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ShowTime { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether hour is shown.
+        /// </summary>
+        /// <value><c>true</c> if hour is shown; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ShowHour { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether minutes are shown.
+        /// </summary>
+        /// <value><c>true</c> if minutes are shown; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ShowMinutes { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether seconds are shown.
+        /// </summary>
+        /// <value><c>true</c> if seconds are shown; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ShowSeconds { get; set; }
+
+        /// <summary>
+        /// Gets or sets the hours step.
+        /// </summary>
+        /// <value>The hours step.</value>
+        [Parameter]
+        public string HoursStep { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the minutes step.
+        /// </summary>
+        /// <value>The minutes step.</value>
+        [Parameter]
+        public string MinutesStep { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the seconds step.
+        /// </summary>
+        /// <value>The seconds step.</value>
+        [Parameter]
+        public string SecondsStep { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the hour picker is padded with a leading zero.
+        /// </summary>
+        /// <value><c>true</c> if hour component is padded; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool PadHours { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the minute picker is padded with a leading zero.
+        /// </summary>
+        /// <value><c>true</c> if hour component is padded; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool PadMinutes { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether the second picker is padded with a leading zero.
+        /// </summary>
+        /// <value><c>true</c> if hour component is padded; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool PadSeconds { get; set; }
+
+        enum StepType
+        {
+            /// <summary>
+            /// The hours
+            /// </summary>
+            Hours,
+            /// <summary>
+            /// The minutes
+            /// </summary>
+            Minutes,
+            /// <summary>
+            /// The seconds
+            /// </summary>
+            Seconds
+        }
+
+        double getStep(StepType type)
+        {
+            double step = 1;
+
+            if (type == StepType.Hours)
+            {
+                step = parseStep(HoursStep);
+            }
+            else if (type == StepType.Minutes)
+            {
+                step = parseStep(MinutesStep);
+            }
+            else if (type == StepType.Seconds)
+            {
+                step = parseStep(SecondsStep);
+            }
+
+            return step;
+        }
+
+        double parseStep(string step)
+        {
+            return string.IsNullOrEmpty(step) || step == "any" ? 1 : double.Parse(step.Replace(",", ".", StringComparison.Ordinal), CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether time ok button is shown.
+        /// </summary>
+        /// <value><c>true</c> if time ok button is shown; otherwise, <c>false</c>.</value>
+        [Parameter]
+        public bool ShowTimeOkButton { get; set; } = true;
+
+        /// <summary>
+        /// Gets or sets the date format.
+        /// </summary>
+        /// <value>The date format.</value>
+        [Parameter]
+        public string DateFormat { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the year range.
+        /// </summary>
+        /// <value>The year range.</value>
+        [Parameter]
+        public string YearRange { get; set; } = $"1950:{DateTime.Now.AddYears(30).Year}";
+
+        /// <summary>
+        /// Gets or sets the hour format.
+        /// </summary>
+        /// <value>The hour format.</value>
+        [Parameter]
+        public string HourFormat { get; set; } = "24";
+
+        /// <summary>
+        /// Gets or sets the input placeholder.
+        /// </summary>
+        /// <value>The input placeholder.</value>
+        [Parameter]
+        public string Placeholder { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Gets or sets the change callback.
+        /// </summary>
+        /// <value>The change callback.</value>
+        [Parameter]
+        public EventCallback<DateTime?> Change { get; set; }
+
+        /// <summary>
+        /// Gets or sets the OK click callback. Fires only when the user clicks the OK button
+        /// (visible when <see cref="ShowTimeOkButton"/> is <c>true</c>), allowing developers to
+        /// distinguish between intermediate day-selection changes and the final user confirmation.
+        /// </summary>
+        /// <value>The OK click callback.</value>
+        [Parameter]
+        public EventCallback<DateTime?> OkClick { get; set; }
+
+        /// <summary>
+        /// Gets or sets the value changed callback.
+        /// </summary>
+        /// <value>The value changed callback.</value>
+        [Parameter]
+        public EventCallback<TValue> ValueChanged { get; set; }
+
+        /// <summary>
+        /// Gets or sets the footer template.
+        /// </summary>
+        /// <value>The footer template.</value>
+        [Parameter]
+        public RenderFragment? FooterTemplate { get; set; }
+
+        string contentStyle = "display:none;";
+
+        private string GetStyle()
+        {
+            return $"{(Inline ? "overflow:auto;" : "")}{(Style != null ? Style : "")}";
+        }
+
+        /// <summary> Gets the current placeholder. Returns empty string if this component is inside a RadzenFormField.</summary>
+        protected string CurrentPlaceholder => FormFieldContext?.AllowFloatingLabel == true ? " " : Placeholder;
+
+        /// <summary>
+        /// Closes this instance popup.
+        /// </summary>
+        public void Close()
+        {
+            if (Disabled || ReadOnly || Inline)
+            {
+                return;
+            }
+
+            RevertUncommittedTimeChange();
+            ResetView();
+
+            if (PopupRenderMode == PopupRenderMode.OnDemand)
+            {
+                if (popup != null)
+                {
+                    InvokeAsync(() => popup.CloseAsync(Element));
+                }
+            }
+            else if (JSRuntime != null)
+            {
+                JSRuntime.InvokeVoid("Radzen.closePopup", PopupID);
+            }
+
+            contentStyle = "display:none;";
+            StateHasChanged();
+        }
+
+        private string PopupStyle
+        {
+            get
+            {
+                if (Inline)
+                {
+                    return "";
+                }
+
+                var width = MonthsToDisplay > 1 ? $"--rz-datepicker-months: {MonthsToDisplay};" : "";
+
+                return $"{contentStyle}{width}";
+            }
+        }
+
+        async Task OnChange()
+        {
+            immediateText = null;
+
+            // In Multiple mode we update and raise ValueChanged/Change elsewhere
+            if (Multiple)
+            {
+                return;
+            }
+
+            // IMPORTANT: internally we often store DateTime even when TValue is DateTimeOffset.
+            // Always decide the outgoing type from TValue to avoid InvalidCastException.
+            var typeofTValue = typeof(TValue);
+
+            if ((typeofTValue == typeof(DateTimeOffset) || typeofTValue == typeof(DateTimeOffset?)) && Value is DateTime dateTimeValue)
+            {
+                var specified = DateTime.SpecifyKind(dateTimeValue, Kind);
+
+                // Preserve the original offset when possible; otherwise fall back to the DateTime's offset.
+                var adjusted = dateTimeOffsetValueOffset.HasValue
+                    ? new DateTimeOffset(specified, dateTimeOffsetValueOffset.Value)
+                    : new DateTimeOffset(specified);
+
+                await ValueChanged.InvokeAsync((TValue)(object)adjusted);
+            }
+            else if (Value is DateTime dtValue)
+            {
+                var specified = DateTime.SpecifyKind(dtValue, Kind);
+                await ValueChanged.InvokeAsync((TValue)(object)specified);
+            }
+            else
+            {
+                await ValueChanged.InvokeAsync(Value != null ? (TValue)Value : default(TValue)!);
+            }
+
+            if (FieldIdentifier.FieldName != null) { EditContext?.NotifyFieldChanged(FieldIdentifier); }
+            await Change.InvokeAsync(DateTimeValue);
+
+        }
+
+        /// <summary>
+        /// Gets or sets the size of the component.
+        /// </summary>
+        [Parameter]
+        public InputSize InputSize { get; set; } = InputSize.Medium;
+
+        /// <inheritdoc />
+        protected override string GetComponentCssClass()
+        {
+            return ClassList.Create("rz-datepicker")
+                            .AddInputSize(InputSize)
+                            .Add("rz-datepicker-inline", Inline)
+                            .Add("rz-datepicker-range", IsRange)
+                            .AddDisabled(Disabled)
+                            .Add("rz-state-empty", !HasValue)
+                            .Add(FieldIdentifier, EditContext)
+                            .ToString();
+
+        }
+
+        private async Task SetDay(DateTime newValue)
+        {
+            if (IsRange)
+            {
+                var picked = DateTime.SpecifyKind(newValue.Date, Kind);
+
+                if (!rangeStart.HasValue || rangeEnd.HasValue || picked < rangeStart.Value)
+                {
+                    rangeStart = picked;
+                    rangeEnd = null;
+                    rangeHoverEnd = null;
+                    await UpdateValueFromRange();
+                }
+                else
+                {
+                    rangeEnd = picked;
+                    rangeHoverEnd = null;
+                    await UpdateValueFromRange();
+                    Close();
+                    await FocusAsync();
+                }
+
+                return;
+            }
+
+            if (Multiple)
+            {
+                var picked = new DateTime(newValue.Year, newValue.Month, newValue.Day, 0, 0, 0);
+                ToggleSelectedDate(picked);
+                await UpdateValueFromSelectedDates(picked);
+            }
+            else if (ShowTimeOkButton)
+            {
+                CurrentDate = ClampToMinMax(new DateTime(newValue.Year, newValue.Month, newValue.Day, CurrentDate.Hour, CurrentDate.Minute, CurrentDate.Second));
+                await OnOkClick(!ShowTime);
+            }
+            else
+            {
+                var v = ClampToMinMax(new DateTime(newValue.Year, newValue.Month, newValue.Day, CurrentDate.Hour, CurrentDate.Minute, CurrentDate.Second));
+                if (v != DateTimeValue)
+                {
+                    DateTimeValue = v;
+                    await OnChange();
+                    Close();
+                }
+            }
+            if (!Multiple)
+            {
+                await FocusAsync();
+            }
+        }
+
+        async Task UpdateValueFromRange()
+        {
+            object? newValue = rangeStart.HasValue || rangeEnd.HasValue ? new DateRange(rangeStart, rangeEnd) : null;
+
+            if (EqualityComparer<object>.Default.Equals(newValue, _value))
+            {
+                return;
+            }
+
+            _value = newValue;
+            _dateTimeValue = rangeStart ?? rangeEnd;
+
+            if (ValueChanged.HasDelegate)
+            {
+                await ValueChanged.InvokeAsync(newValue == null ? default(TValue) : (TValue)newValue);
+            }
+
+            if (FieldIdentifier.FieldName != null)
+            {
+                EditContext?.NotifyFieldChanged(FieldIdentifier);
+            }
+
+            await Change.InvokeAsync(rangeEnd ?? rangeStart);
+            StateHasChanged();
+        }
+
+        void ToggleSelectedDate(DateTime date)
+        {
+            date = date.Date;
+            var index = selectedDates.FindIndex(d => d.Date == date);
+            if (index >= 0)
+            {
+                selectedDates.RemoveAt(index);
+            }
+            else
+            {
+                selectedDates.Add(DateTime.SpecifyKind(date, Kind));
+            }
+            InvalidateSelectedDates();
+        }
+
+        async Task UpdateValueFromSelectedDates(DateTime? lastSelected)
+        {
+            object? newValue = null;
+
+            var typeofTValue = typeof(TValue);
+            if (typeofTValue.IsArray && typeofTValue.GetElementType() == typeof(DateTime))
+            {
+                newValue = selectedDates.ToArray();
+            }
+            else if (typeof(IEnumerable<DateTime>).IsAssignableFrom(typeofTValue))
+            {
+                newValue = selectedDates.ToList();
+            }
+            else if (typeof(IEnumerable<DateTimeOffset?>).IsAssignableFrom(typeofTValue))
+            {
+                var list = new List<DateTimeOffset?>();
+                foreach (var d in selectedDates)
+                {
+                    var kinded = DateTime.SpecifyKind(d, Kind);
+                    list.Add(new DateTimeOffset(kinded));
+                }
+                newValue = list;
+            }
+            else if (typeof(IEnumerable<DateTime?>).IsAssignableFrom(typeofTValue))
+            {
+                newValue = selectedDates.Select(d => (DateTime?)d).ToList();
+            }
+            else if (typeof(IEnumerable<DateOnly>).IsAssignableFrom(typeofTValue))
+            {
+                newValue = selectedDates.Select(d => DateOnly.FromDateTime(d)).ToList();
+            }
+            else if (typeof(IEnumerable<DateOnly?>).IsAssignableFrom(typeofTValue))
+            {
+                newValue = selectedDates.Select(d => (DateOnly?)DateOnly.FromDateTime(d)).ToList();
+            }
+            else if (typeof(IEnumerable<TimeOnly?>).IsAssignableFrom(typeofTValue))
+            {
+                newValue = selectedDates.Select(d => (TimeOnly?)new TimeOnly(d.Hour, d.Minute, d.Second, d.Millisecond)).ToList();
+            }
+            else
+            {
+                newValue = selectedDates.ToList();
+            }
+
+            _value = newValue;
+            _dateTimeValue = lastSelected;
+
+            if (ValueChanged.HasDelegate)
+            {
+                await ValueChanged.InvokeAsync((TValue)(object)newValue);
+            }
+
+            if (FieldIdentifier.FieldName != null)
+            {
+                EditContext?.NotifyFieldChanged(FieldIdentifier);
+            }
+
+            await Change.InvokeAsync(_dateTimeValue);
+            StateHasChanged();
+        }
+
+        private void SetMonth(int calendarMonth)
+        {
+            var calendar = Culture.Calendar;
+            var calYear = calendar.GetYear(CurrentDate);
+            var calDay = Math.Min(calendar.GetDayOfMonth(CurrentDate), calendar.GetDaysInMonth(calYear, calendarMonth));
+            var newValue = new DateTime(calYear, calendarMonth, calDay, CurrentDate.Hour, CurrentDate.Minute, CurrentDate.Second, calendar);
+
+            CurrentDate = newValue;
+        }
+
+        private void SetYear(int calendarYear)
+        {
+            var calendar = Culture.Calendar;
+            var calMonth = calendar.GetMonth(CurrentDate);
+
+            if (calMonth > calendar.GetMonthsInYear(calendarYear))
+            {
+                calMonth = calendar.GetMonthsInYear(calendarYear);
+            }
+
+            var calDay = Math.Min(calendar.GetDayOfMonth(CurrentDate), calendar.GetDaysInMonth(calendarYear, calMonth));
+            var newValue = new DateTime(calendarYear, calMonth, calDay, CurrentDate.Hour, CurrentDate.Minute, CurrentDate.Second, calendar);
+
+            CurrentDate = newValue;
+        }
+
+        /// <summary>
+        /// Gets or sets the edit context.
+        /// </summary>
+        /// <value>The edit context.</value>
+        [CascadingParameter]
+        public EditContext? EditContext { get; set; }
+
+        /// <summary>
+        /// Gets the field identifier.
+        /// </summary>
+        /// <value>The field identifier.</value>
+        [Parameter]
+        public FieldIdentifier FieldIdentifier { get; set; }
+
+        /// <summary>
+        /// Gets or sets the value expression.
+        /// </summary>
+        /// <value>The value expression.</value>
+        [Parameter]
+        public Expression<Func<TValue>>? ValueExpression { get; set; }
+
+        /// <inheritdoc />
+        public override async Task SetParametersAsync(ParameterView parameters)
+        {
+            if (parameters.DidParameterChange(nameof(InitialViewDate), InitialViewDate) &&
+                (DateTimeValue == default(DateTime) || DateTimeValue == null))
+            {
+                _currentDate = default(DateTime);
+            }
+
+            var shouldUpdateYearsAndMonths = parameters.DidParameterChange(nameof(Min), Min)
+                || parameters.DidParameterChange(nameof(Max), Max)
+                || parameters.DidParameterChange(nameof(Culture), Culture)
+                || parameters.DidParameterChange(nameof(DefaultCulture), DefaultCulture);
+
+            var shouldClose = false;
+
+            if (parameters.DidParameterChange(nameof(Visible), Visible))
+            {
+                var visible = parameters.GetValueOrDefault<bool>(nameof(Visible));
+                shouldClose = !visible;
+            }
+
+            var disabledChanged = parameters.DidParameterChange(nameof(Disabled), Disabled);
+
+            var shouldResetView = parameters.DidParameterChange(nameof(ShowDays), ShowDays)
+                || parameters.DidParameterChange(nameof(NavigationMode), NavigationMode);
+
+            await base.SetParametersAsync(parameters);
+
+            if (shouldResetView)
+            {
+                ResetView();
+            }
+
+            if (shouldUpdateYearsAndMonths)
+            {
+                UpdateYearsAndMonths(Min, Max);
+            }
+
+            if (disabledChanged)
+            {
+                FormFieldContext?.DisabledChanged(Disabled);
+            }
+
+            if (shouldClose && !firstRender && IsJSRuntimeAvailable && JSRuntime != null)
+            {
+                await JSRuntime.InvokeVoidAsync("Radzen.destroyPopup", PopupID);
+            }
+
+            if (EditContext != null && ValueExpression != null && FieldIdentifier.Model != EditContext.Model)
+            {
+                FieldIdentifier = FieldIdentifier.Create(ValueExpression);
+                EditContext.OnValidationStateChanged -= ValidationStateChanged;
+                EditContext.OnValidationStateChanged += ValidationStateChanged;
+            }
+        }
+
+        bool firstRender;
+
+        /// <inheritdoc />
+        protected override async Task OnAfterRenderAsync(bool firstRender)
+        {
+            await base.OnAfterRenderAsync(firstRender);
+
+            this.firstRender = firstRender;
+
+            if (shouldFocusDay && JSRuntime != null)
+            {
+                shouldFocusDay = false;
+                try
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.focusElement", GetDayCellId(FocusedDate));
+                }
+                catch { }
+            }
+
+            if (shouldFocusTitle && JSRuntime != null)
+            {
+                shouldFocusTitle = false;
+                try
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.focusElement", GetId() + "tb");
+                }
+                catch { }
+            }
+
+            if (shouldFocusMonthCell && JSRuntime != null)
+            {
+                shouldFocusMonthCell = false;
+                try
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.focusElement", $"{GetId()}-month-{GetCalendarMonth(CurrentDate)}");
+                }
+                catch { }
+            }
+
+            if (shouldFocusYearCell && JSRuntime != null)
+            {
+                shouldFocusYearCell = false;
+                try
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.focusElement", $"{GetId()}-year-{GetCalendarYear(CurrentDate)}");
+                }
+                catch { }
+            }
+        }
+
+        private void ValidationStateChanged(object? sender, ValidationStateChangedEventArgs e)
+        {
+            StateHasChanged();
+        }
+
+        /// <inheritdoc />
+        public override void Dispose()
+        {
+            base.Dispose();
+
+            if (EditContext != null)
+            {
+                EditContext.OnValidationStateChanged -= ValidationStateChanged;
+            }
+
+            Form?.RemoveComponent(this);
+
+            if (IsJSRuntimeAvailable && JSRuntime != null)
+            {
+                JSRuntime.InvokeVoid("Radzen.destroyPopup", PopupID);
+            }
+
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Gets the value.
+        /// </summary>
+        /// <returns>System.Object.</returns>
+        public object? GetValue()
+        {
+            return Value;
+        }
+
+        private string PopupID
+        {
+            get
+            {
+                return $"popup{GetId()}";
+            }
+        }
+
+        RadzenPopup? popup;
+
+        /// <summary>
+        /// Gets or sets the render mode.
+        /// </summary>
+        /// <value>The render mode.</value>
+        [Parameter]
+        public PopupRenderMode PopupRenderMode { get; set; } = PopupRenderMode.Initial;
+
+        async Task OnToggle()
+        {
+            if (Disabled || ReadOnly || Inline)
+            {
+                return;
+            }
+
+            if (PopupRenderMode == PopupRenderMode.Initial)
+            {
+                if (JSRuntime != null)
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.togglePopup", Element, PopupID, false, Reference, nameof(OnPopupClose), true, false);
+                }
+            }
+            else
+            {
+                if (popup != null)
+                {
+                    await popup.ToggleAsync(Element);
+                }
+                await FocusAsync();
+            }
+        }
+
+        async Task OnInputClick()
+        {
+            if (!ShowButton && !Disabled && !ReadOnly && !Inline && PopupRenderMode == PopupRenderMode.Initial && JSRuntime != null)
+            {
+                await JSRuntime.InvokeVoidAsync("Radzen.togglePopup", Element, PopupID, false, Reference, nameof(OnPopupClose), true, false);
+            }
+        }
+        DateTime FocusedDate { get; set; } = DateTime.Now;
+
+        string GetDayCssClass(DateTime date, DateRenderEventArgs dateArgs, bool forCell = true)
+        {
+            return GetDayCssClass(date, dateArgs, CurrentDate, forCell);
+        }
+
+        string GetDayCssClass(DateTime date, DateRenderEventArgs dateArgs, DateTime viewMonth, bool forCell)
+        {
+            var list = ClassList.Create()
+                               .Add("rz-state-default", !forCell)
+                               .Add("rz-calendar-other-month", GetCalendarMonth(viewMonth) != GetCalendarMonth(date))
+                               .Add("rz-state-active", !forCell && (IsRange ? IsRangeEndpoint(date) : Multiple ? IsSelectedDate(date) : (DateTimeValue.HasValue && DateTimeValue.Value.Date.CompareTo(date.Date) == 0)))
+                               .Add("rz-calendar-range", !forCell && IsDateInRange(date))
+                               .Add("rz-calendar-today", !forCell && DateTime.Now.Date.CompareTo(date.Date) == 0)
+                               .Add("rz-state-focused", !forCell && FocusedDate.Date.CompareTo(date.Date) == 0)
+                               .Add("rz-state-disabled", !forCell && dateArgs.Disabled);
+
+            if (dateArgs.Attributes != null && dateArgs.Attributes.TryGetValue("class", out var @class) && !string.IsNullOrEmpty(Convert.ToString(@class, CultureInfo.InvariantCulture)))
+            {
+                list.Add($"{@class}", true);
+            }
+
+            return list.ToString();
+        }
+        async Task OnPopupKeyDown(KeyboardEventArgs args)
+        {
+            var key = args.Code != null ? args.Code : args.Key;
+            if(key == "Escape")
+            {
+                preventKeyPress = false;
+
+                OnEscape?.Invoke();
+                await ClosePopup();
+                await FocusAsync();
+            }
+        }
+
+        async Task OnKeyPress(KeyboardEventArgs args)
+        {
+            var key = args.Code != null ? args.Code : args.Key;
+
+            if (args.AltKey && key == "ArrowDown")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                if (PopupRenderMode == PopupRenderMode.Initial && JSRuntime != null)
+                {
+                    await JSRuntime.InvokeVoidAsync("Radzen.openPopup", Element, PopupID, false, null, null, null, Reference, nameof(OnPopupClose), true, true);
+                }
+                else if (popup != null)
+                {
+                    await popup.CloseAsync(Element);
+                    await popup.ToggleAsync(Element);
+                }
+            }
+            else if (key == "Enter")
+            {
+                preventKeyPress = true;
+                stopKeydownPropagation = true;
+
+                await TogglePopup();
+            }
+            else if (key == "Escape")
+            {
+                preventKeyPress = false;
+                stopKeydownPropagation = false;
+
+                await ClosePopup();
+                await FocusAsync();
+            }
+            else
+            {
+                preventKeyPress = false;
+                stopKeydownPropagation = false;
+            }
+        }
+
+        internal async Task TogglePopup()
+        {
+            if (Inline)
+            {
+                return;
+            }
+
+            if (PopupRenderMode == PopupRenderMode.Initial && JSRuntime != null)
+            {
+                await JSRuntime.InvokeVoidAsync("Radzen.togglePopup", Element, PopupID, false, Reference, nameof(OnPopupClose), true, true);
+            }
+            else if (popup != null)
+            {
+                await popup.ToggleAsync(Element);
+            }
+        }
+
+        async Task ClosePopup()
+        {
+            if (Inline)
+            {
+                return;
+            }
+
+            RevertUncommittedTimeChange();
+            ResetView();
+
+            if (PopupRenderMode == PopupRenderMode.Initial && JSRuntime != null)
+            {
+                await JSRuntime.InvokeVoidAsync("Radzen.closePopup", PopupID);
+            }
+            else if (popup != null)
+            {
+                await popup.CloseAsync(Element);
+            }
+        }
+
+        bool preventKeyPress;
+        bool stopKeydownPropagation;
+
+        /// <inheritdoc/>
+        public async ValueTask FocusAsync()
+        {
+            // If ShowButton is false, the input box is always shown
+            if (ShowInput || !ShowButton)
+            {
+                try
+                {
+                    await input.FocusAsync();
+                }
+                catch
+                { }
+            }
+            
+        }
+    }
+}

@@ -1,0 +1,36 @@
+using System.Collections.Generic;
+
+namespace RadzenBlazorDemos
+{
+    public class Example
+    {
+        public bool New { get; set; }
+        public bool Updated { get; set; }
+        public bool Pro { get; set; }
+        public string Name { get; set; }
+        public string Icon { get; set; }
+        public string Path { get; set; }
+        public string Title { get; set; }
+        public string Description { get; set; }
+        public bool Expanded { get; set; }
+        public IEnumerable<Example> Children { get; set; }
+        public IEnumerable<string> Tags { get; set; }
+        public IEnumerable<ExampleSection> Toc { get; set; }
+
+        // SEO enrichment (rendered on-page and as JSON-LD by DemoSeo). Optional.
+        public IEnumerable<string> Related { get; set; }
+        public IEnumerable<FaqItem> Faq { get; set; }
+    }
+
+    public class ExampleSection
+    {
+        public string Text { get; set; }
+        public string Anchor { get; set; }
+    }
+
+    public class FaqItem
+    {
+        public string Question { get; set; }
+        public string Answer { get; set; }
+    }
+}

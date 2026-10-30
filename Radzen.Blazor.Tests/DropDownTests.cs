@@ -1,0 +1,1818 @@
+using AngleSharp.Dom;
+using Bunit;
+using Microsoft.AspNetCore.Components;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
+using Xunit;
+
+namespace Radzen.Blazor.Tests
+{
+    public class DropDownTests
+    {
+        class DataItem
+        {
+            public string Text { get; set; }
+            public int Id { get; set; }
+            public bool Disabled { get; set; }
+        }
+
+        private static IRenderedComponent<RadzenDropDown<T>> DropDown<T>(TestContext ctx, Action<ComponentParameterCollectionBuilder<RadzenDropDown<T>>> configure = null)
+        {
+            var data = new[] {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<T>>();
+
+            component.SetParametersAndRender(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+
+                if (configure != null)
+                {
+                    configure.Invoke(parameters);
+                }
+                else
+                {
+                    parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                }
+            });
+
+            return component;
+        }
+
+
+        [Fact]
+        public async Task Dropdown_SelectItem_Method_Should_Not_Throw()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx);
+
+            var items = component.FindAll(".rz-dropdown-item");
+
+            Assert.Equal(2, items.Count);
+
+            //this throws
+            await component.InvokeAsync(async () => await component.Instance.SelectItem(1));
+        }
+
+        [Fact]
+        public void DropDown_RendersItems()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx);
+
+            var items = component.FindAll(".rz-dropdown-item");
+
+            Assert.Equal(2, items.Count);
+        }
+
+        [Fact]
+        public void DropDown_NonFilterable_TabWhenOpen_DoesNotInvokeFocusNext()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = ctx.RenderComponent<RadzenDropDown<string>>(p =>
+            {
+                p.Add(x => x.Data, new[] { "one", "two" });
+            });
+
+            var combo = component.Find("[role='combobox']");
+
+            combo.KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Code = "Enter" });
+            combo.KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Code = "Tab" });
+
+            var focusNextCalls = ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.focusNext");
+            Assert.Equal(0, focusNextCalls);
+        }
+
+        [Fact]
+        public void DropDown_NonFilterable_TabAfterArrow_DoesNotInvokeFocusNext()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx);
+
+            var combo = component.Find("[role='combobox']");
+
+            combo.KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Code = "ArrowDown" });
+            combo.KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Code = "Tab" });
+
+            var focusNextCalls = ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.focusNext");
+            Assert.Equal(0, focusNextCalls);
+        }
+
+        [Theory]
+        [InlineData(false)]
+        [InlineData(true)]
+        public void DropDown_Filterable_TabInSearchWhenOpen_InvokesFocusNextWithPopupId(bool shiftKey)
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, p =>
+            {
+                p.Add(x => x.ValueProperty, nameof(DataItem.Id));
+                p.Add(x => x.AllowFiltering, true);
+            });
+
+            component.Find("[role='combobox']").Click();
+            component.Find(".rz-dropdown-filter").KeyDown(new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Code = "Tab", ShiftKey = shiftKey });
+
+            var popupId = component.Find(".rz-dropdown-panel").Id;
+            var focusNext = Assert.Single(ctx.JSInterop.Invocations, i => i.Identifier == "Radzen.focusNext");
+            Assert.Equal(shiftKey, focusNext.Arguments[1]);
+            Assert.Equal(popupId, focusNext.Arguments[2]);
+        }
+
+        [Fact]
+        public void DropDown_AppliesSelectionStyleForIntValue()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx);
+
+            var items = component.FindAll(".rz-dropdown-item");
+
+            items[0].Click();
+
+            component.Render();
+
+            items = component.FindAll(".rz-dropdown-item");
+
+            Assert.Contains("rz-state-highlight", items[0].ClassList);
+        }
+
+        [Fact]
+        public void DropDown_AppliesSelectionStyleForStringValue()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<string>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Text));
+            });
+
+            var items = component.FindAll(".rz-dropdown-item");
+
+            items[0].Click();
+
+            component.Render();
+
+            items = component.FindAll(".rz-dropdown-item");
+
+            Assert.Contains("rz-state-highlight", items[0].ClassList);
+        }
+
+        [Fact]
+        public void DropDown_Respects_ItemEqualityComparer()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            List<DataItem> boundCollection = [new() { Text = "Item 2" }];
+
+            var component = DropDown<List<DataItem>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ItemComparer, new DataItemComparer());
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, boundCollection);
+            });
+
+            var selectedItems = component.FindAll(".rz-state-highlight");
+            Assert.Equal(1, selectedItems.Count);
+            Assert.Equal("Item 2", selectedItems[0].TextContent.Trim());
+
+            // select Item 1 in list
+            var items = component.FindAll(".rz-multiselect-item");
+            items[0].Click();
+            component.Render();
+
+            selectedItems = component.FindAll(".rz-state-highlight");
+            Assert.Equal(2, selectedItems.Count);
+            Assert.Equal("Item 1", selectedItems[0].TextContent.Trim());
+        }
+
+        [Fact]
+        public void DropDown_Multiple_SelectsItemsMatchingBoundValueByValueProperty()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<IEnumerable<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<int> { 2 });
+            });
+
+            var selected = component.FindAll(".rz-state-highlight");
+            Assert.Equal(1, selected.Count);
+            Assert.Equal("Item 2", selected[0].TextContent.Trim());
+        }
+
+#pragma warning disable 659
+        class FaultyHashValue
+        {
+            public int Id { get; set; }
+            public override bool Equals(object obj) => obj is FaultyHashValue other && other.Id == Id;
+        }
+#pragma warning restore 659
+
+        class FaultyHashItem
+        {
+            public string Text { get; set; }
+            public FaultyHashValue Key { get; set; }
+        }
+
+        [Fact]
+        public void DropDown_Multiple_SelectsEqualValuesWhenValueTypeDoesNotOverrideGetHashCode()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new FaultyHashItem { Text = "Item 1", Key = new FaultyHashValue { Id = 1 } },
+                new FaultyHashItem { Text = "Item 2", Key = new FaultyHashValue { Id = 2 } },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<FaultyHashValue>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(FaultyHashItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(FaultyHashItem.Key));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<FaultyHashValue> { new FaultyHashValue { Id = 2 } });
+            });
+
+            var selected = component.FindAll(".rz-state-highlight");
+            Assert.Equal(1, selected.Count);
+            Assert.Equal("Item 2", selected[0].TextContent.Trim());
+        }
+
+        class CaseInsensitiveObjectComparer : IEqualityComparer<object>
+        {
+            public new bool Equals(object x, object y) => string.Equals(x as string, y as string, StringComparison.OrdinalIgnoreCase);
+            public int GetHashCode(object obj) => obj is string s ? StringComparer.OrdinalIgnoreCase.GetHashCode(s) : obj?.GetHashCode() ?? 0;
+        }
+
+        class CaseInsensitiveValueCollection : ICollection<object>
+        {
+            readonly HashSet<object> items = new(new CaseInsensitiveObjectComparer());
+
+            public int Count => items.Count;
+            public bool IsReadOnly => false;
+            public void Add(object item) => items.Add(item);
+            public void Clear() => items.Clear();
+            public bool Contains(object item) => items.Contains(item);
+            public void CopyTo(object[] array, int arrayIndex) => items.CopyTo(array, arrayIndex);
+            public bool Remove(object item) => items.Remove(item);
+            public IEnumerator<object> GetEnumerator() => items.GetEnumerator();
+            IEnumerator IEnumerable.GetEnumerator() => items.GetEnumerator();
+        }
+
+        [Fact]
+        public void DropDown_Multiple_AsksCustomCollectionsForMembership()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<ICollection<object>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new CaseInsensitiveValueCollection { "ITEM 2" });
+            });
+
+            var selected = component.FindAll(".rz-state-highlight");
+            Assert.Equal(1, selected.Count);
+            Assert.Equal("Item 2", selected[0].TextContent.Trim());
+        }
+
+        [Fact]
+        public void DropDown_Multiple_DoesNotDuplicateItemsForRepeatedBoundValues()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<IEnumerable<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<int> { 1, 1, 2 });
+            });
+
+            var selected = component.FindAll(".rz-state-highlight");
+            Assert.Equal(2, selected.Count);
+            var texts = selected.Select(s => s.TextContent.Trim()).OrderBy(t => t).ToList();
+            Assert.Equal(new[] { "Item 1", "Item 2" }, texts);
+        }
+
+        class SelfRenderingDropDown<TValue> : RadzenDropDown<TValue>
+        {
+            public Task Rerender() => InvokeAsync(StateHasChanged);
+        }
+
+        [Fact]
+        public async Task DropDown_Multiple_InPlaceElementReplacement_UpdatesSelectionOnInternalRender()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var value = new List<int> { 2 };
+
+            var component = ctx.RenderComponent<SelfRenderingDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, value);
+            });
+
+            Assert.Equal(new[] { "Item 2" },
+                component.FindAll(".rz-state-highlight").Select(s => s.TextContent.Trim()).ToArray());
+
+            value[0] = 1;
+
+            await component.Instance.Rerender();
+
+            Assert.Equal(new[] { "Item 1" },
+                component.FindAll(".rz-state-highlight").Select(s => s.TextContent.Trim()).ToArray());
+        }
+
+        [Fact]
+        public void DropDown_Multiple_InPlaceElementReplacement_UpdatesSelectionOnReRender()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            // Same list and count ensure the membership is rebuilt rather than reused.
+            var value = new List<int> { 2 };
+            var component = DropDown<IEnumerable<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, value);
+            });
+
+            Assert.Equal(new[] { "Item 2" },
+                component.FindAll(".rz-state-highlight").Select(s => s.TextContent.Trim()).ToArray());
+
+            value[0] = 1;
+            component.Render();
+
+            Assert.Equal(new[] { "Item 1" },
+                component.FindAll(".rz-state-highlight").Select(s => s.TextContent.Trim()).ToArray());
+        }
+
+        [Fact]
+        public void DropDown_Multiple_InPlaceDataMutation_ResolvesSelectedLabelOnReRender()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            // Bind value 3, whose item is not in Data yet, then add the matching item to the SAME Data
+            // list (same reference) and re-render. Resolving the bound value must see the new item so its
+            // label shows - a value->item lookup keyed only on the Data reference would stay stale and blank.
+            var data = new List<DataItem>
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<int> { 3 });
+            });
+
+            data.Add(new DataItem { Text = "Item 3", Id = 3 });
+            component.SetParametersAndRender(parameters => parameters.Add(p => p.Data, data));
+
+            Assert.Contains(component.FindAll(".rz-dropdown-label"), l => l.TextContent.Contains("Item 3"));
+        }
+
+        [Fact]
+        public void DropDown_ItemText_UpdatesWhenItemMutatedInPlace()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            // ShouldRender must compare the resolved text, not the Item reference: mutating an item's
+            // TextProperty value in place (same reference) then re-rendering must update the displayed text.
+            var data = new List<DataItem>
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            Assert.Contains("Item 1", component.Markup);
+
+            data[0].Text = "Renamed";
+            component.Render();
+
+            Assert.Contains("Renamed", component.Markup);
+            Assert.DoesNotContain("Item 1", component.Markup);
+        }
+
+        enum ItemColor { Red = 1, Green = 2, Blue = 3 }
+
+        class ColorItem
+        {
+            public string Name { get; set; }
+            public ItemColor Code { get; set; }
+        }
+
+        [Fact]
+        public void DropDown_Multiple_ResolvesEnumValuePropertyFromIntegerValues()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new List<ColorItem>
+            {
+                new ColorItem { Name = "Red", Code = ItemColor.Red },
+                new ColorItem { Name = "Green", Code = ItemColor.Green },
+                new ColorItem { Name = "Blue", Code = ItemColor.Blue },
+            };
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(ColorItem.Name));
+                parameters.Add(p => p.ValueProperty, nameof(ColorItem.Code));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<int> { 1, 3 });
+            });
+
+            var label = component.Find(".rz-dropdown-label").TextContent;
+            Assert.Contains("Red", label);
+            Assert.Contains("Blue", label);
+            Assert.DoesNotContain("Green", label);
+        }
+
+        class CodeItem
+        {
+            public string Name { get; set; }
+            public string Code { get; set; }
+        }
+
+        [Fact]
+        public void DropDown_Multiple_NullBoundValue_SelectsItemWithNullValue()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new List<CodeItem>
+            {
+                new CodeItem { Name = "Alpha", Code = "a" },
+                new CodeItem { Name = "Beta", Code = null },
+            };
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<string>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(CodeItem.Name));
+                parameters.Add(p => p.ValueProperty, nameof(CodeItem.Code));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<string> { null, "a" });
+            });
+
+            var label = component.Find(".rz-dropdown-label").TextContent;
+            Assert.Contains("Alpha", label);
+            Assert.Contains("Beta", label);
+        }
+
+        class PreservingDropDown<TValue> : RadzenDropDown<TValue>
+        {
+            public PreservingDropDown()
+            {
+                PreserveCollectionOnSelection = true;
+            }
+        }
+
+        [Fact]
+        public void DropDown_Multiple_PreserveCollection_Clear_RemovesSelection()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new List<DataItem>
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+            var component = ctx.RenderComponent<PreservingDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.AllowClear, true);
+                parameters.Add(p => p.Value, new List<int> { 2 });
+            });
+
+            Assert.Equal(1, component.FindAll(".rz-state-highlight").Count);
+
+            component.Find(".rz-dropdown-clear-icon").Click();
+
+            Assert.Empty(component.FindAll(".rz-state-highlight"));
+        }
+
+        [Fact]
+        public void DropDown_AppliesSelectionStyleWhenMultipleSelectionIsEnabled()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<string>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.Multiple, true);
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+
+            items[0].Click();
+
+            component.Render();
+
+            items = component.FindAll(".rz-multiselect-item");
+
+            items[1].Click();
+
+            component.Render();
+
+            var selectedItems = component.FindAll(".rz-state-highlight");
+
+            Assert.Equal(2, selectedItems.Count);
+        }
+
+        [Fact]
+        public void DropDown_AppliesValueTemplateOnMultipleSelection()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var valueTemplateFragment = (RenderFragment<dynamic>)(_context =>
+            builder =>
+            {
+                builder.AddContent(0, $"value: {_context.Text}");
+            });
+
+            var component = DropDown<string>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true)
+                    .Add(p => p.ValueTemplate, valueTemplateFragment);
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+
+            items[0].Click();
+            items[1].Click();
+
+            component.Render();
+
+            var selectedItems = component.Find(".rz-inputtext");
+
+            Assert.Contains("value: Item 1,value: Item 2", selectedItems.Text());
+        }
+
+        [Fact]
+        public void DropDown_AppliesValueTemplateWhenTepmlateDefined()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var valueTemplateFragment = (RenderFragment<dynamic>)(_context =>
+            builder =>
+            {
+                builder.AddContent(0, $"value: {_context.Text}");
+            });
+
+            var templateFragment = (RenderFragment<dynamic>)(_context =>
+            builder =>
+            {
+                builder.AddContent(0, $"template: {_context.Text}");
+            });
+
+            var component = DropDown<string>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true)
+                    .Add(p => p.ValueTemplate, valueTemplateFragment)
+                    .Add(p => p.Template, templateFragment);
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+
+            items[0].Click();
+            items[1].Click();
+
+            component.Render();
+
+            var selectedItems = component.Find(".rz-inputtext");
+            var itemsText = component.FindAll(".rz-multiselect-item-content");
+
+            Assert.Collection(itemsText, item => Assert.Contains("template: Item 1", item.Text()), item => Assert.Contains("template: Item 2", item.Text()));
+            Assert.Contains("value: Item 1,value: Item 2", selectedItems.Text());
+        }
+
+        [Fact]
+        public void DropDown_AppliesValueTemplateOnMultipleSelectionChips()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var valueTemplateFragment = (RenderFragment<dynamic>)(_context =>
+            builder =>
+            {
+                builder.AddContent(0, $"value: {_context.Text}");
+            });
+
+            var component = DropDown<string>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true)
+                    .Add(p => p.ValueTemplate, valueTemplateFragment)
+                    .Add(p => p.Chips, true);
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+
+            items[0].Click();
+            items[1].Click();
+
+            component.Render();
+
+            var selectedItems = component.FindAll(".rz-chip-text");
+
+            Assert.Collection(selectedItems, item => Assert.Contains("value: Item 1", item.Text()), item => Assert.Contains("value: Item 2", item.Text()));
+        }
+
+        [Theory]
+        [InlineData(false, true, false, true, "false")]
+        [InlineData(true, false, true, false, "true")]
+        [InlineData(true, false, false, false, "false")]
+        [InlineData(true, false, false, true, "true")]
+        [InlineData(false, false, false, true, "false")]
+        public void DropDown_AllSelectedFalseIfListIsAllDisabled(bool item1Selected, bool item1Disabled, bool item2Selected, bool item2Disabled, string expectedAriaCheckedValue)
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[] {
+                new DataItem { Text = "Item 1", Id = 1, Disabled = item1Disabled },
+                new DataItem { Text = "Item 2", Id = 2, Disabled = item2Disabled },
+            };
+
+            List<int> selectedValues = [];
+            if (item1Selected)
+            {
+                selectedValues.Add(data[0].Id);
+            }
+            if (item2Selected)
+            {
+                selectedValues.Add(data[1].Id);
+            }
+
+            var component = ctx.RenderComponent<RadzenDropDown<List<int>>>(parameters => parameters
+               .Add(p => p.Data, data)
+               .Add(p => p.Value, selectedValues)
+               .Add(p => p.Multiple, true)
+               .Add(p => p.AllowSelectAll, true)
+               .Add(p => p.TextProperty, nameof(DataItem.Text))
+               .Add(p => p.DisabledProperty, nameof(DataItem.Disabled))
+               .Add(p => p.ValueProperty, nameof(DataItem.Id)));
+
+            Assert.NotNull(component);
+            var highlightedItems = component.FindAll(".rz-state-highlight");
+            Assert.Equal(selectedValues.Count, highlightedItems.Count);
+
+
+            var selectAllCheckBox = component.Find(".rz-multiselect-header input[type='checkbox']");
+
+            Assert.Equal(expectedAriaCheckedValue, selectAllCheckBox.GetAttribute("aria-checked"));
+        }
+
+        [Fact]
+        public void DropDown_ReferenceGenericCollectionAssignment_HashSet_ReferencesInstance()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalHashSet = new HashSet<int>();
+            var capturedValue = (HashSet<int>)null;
+
+            var component = DropDownWithReferenceCollection<HashSet<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalHashSet);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<HashSet<int>>(this, value => capturedValue = value));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+            
+            // Select first item
+            items[0].Click();
+            component.Render();
+
+            // Verify the same HashSet instance is Referenced
+            Assert.Same(originalHashSet, capturedValue);
+            
+            // Verify the item was added correctly
+            Assert.Single(originalHashSet);
+            Assert.Contains(1, originalHashSet);
+        }
+
+        [Fact]
+        public void DropDown_ReferenceGenericCollectionAssignment_HashSet_MultipleSelections()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalHashSet = new HashSet<int> { 2 }; // Pre-populate with Item 2
+            var capturedValues = new List<HashSet<int>>();
+
+            var component = DropDownWithReferenceCollection<HashSet<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalHashSet);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<HashSet<int>>(this, value => capturedValues.Add(value)));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+            
+            // Select first item (should add to existing collection)
+            items[0].Click();
+            component.Render();
+
+            // Verify the same HashSet instance is Referenced
+            Assert.Single(capturedValues);
+            Assert.Same(originalHashSet, capturedValues[0]);
+            
+            // Verify both items are now in the collection
+            Assert.Equal(2, originalHashSet.Count);
+            Assert.Contains(1, originalHashSet);
+            Assert.Contains(2, originalHashSet);
+
+            // Deselect second item (should remove from collection)
+            items = component.FindAll(".rz-multiselect-item"); // Re-find items after render
+            items[1].Click();
+            component.Render();
+
+            // Verify the same HashSet instance is still Referenced
+            Assert.Equal(2, capturedValues.Count);
+            Assert.Same(originalHashSet, capturedValues[1]);
+            
+            // Verify only first item remains
+            Assert.Single(originalHashSet);
+            Assert.Contains(1, originalHashSet);
+            Assert.DoesNotContain(2, originalHashSet);
+        }
+
+        [Fact]
+        public void DropDown_ReferenceGenericCollectionAssignment_SortedSet_ReferencesInstance()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalSortedSet = new SortedSet<int>();
+            var capturedValue = (SortedSet<int>)null;
+
+            var component = DropDownWithReferenceCollection<SortedSet<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalSortedSet);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<SortedSet<int>>(this, value => capturedValue = value));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+            
+            // Select both items
+            items[0].Click();
+            component.Render();
+            items = component.FindAll(".rz-multiselect-item"); // Re-find items after first click
+            items[1].Click();
+            component.Render();
+
+            // Verify the same SortedSet instance is Referenced
+            Assert.Same(originalSortedSet, capturedValue);
+            
+            // Verify items are sorted correctly
+            Assert.Equal(2, originalSortedSet.Count);
+            var sortedItems = originalSortedSet.ToList();
+            Assert.Equal(1, sortedItems[0]);
+            Assert.Equal(2, sortedItems[1]);
+        }
+
+        [Fact]
+        public void DropDown_ReferenceGenericCollectionAssignment_CustomCollection_ReferencesInstance()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalCollection = new CustomCollection<int>();
+            var capturedValue = (CustomCollection<int>)null;
+
+            var component = DropDownWithReferenceCollection<CustomCollection<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalCollection);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<CustomCollection<int>>(this, value => capturedValue = value));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+            
+            // Select first item
+            items[0].Click();
+            component.Render();
+
+            // Verify the same custom collection instance is Referenced
+            Assert.Same(originalCollection, capturedValue);
+            
+            // Verify the item was added correctly
+            Assert.Single(originalCollection);
+            Assert.Contains(1, originalCollection);
+        }
+
+
+        [Fact]
+        public void DropDown_ReferenceGenericCollectionAssignment_List_ReferencesInstance()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalList = new List<int>();
+            var capturedValue = (List<int>)null;
+
+            var component = DropDownWithReferenceCollection<List<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalList);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<List<int>>(this, value => capturedValue = value));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+            
+            // Select first item
+            items[0].Click();
+            component.Render();
+
+            // For List<T>, it should now Reference the instance since we removed the IList exclusion
+            // Arrays are now excluded instead
+            Assert.Same(originalList, capturedValue);
+            
+            // And the content should be correct
+            Assert.Single(capturedValue);
+            Assert.Contains(1, capturedValue);
+        }
+
+        [Fact]
+        public void DropDown_ReferenceGenericCollectionAssignment_DisabledByDefault()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalList = new List<int>();
+            var capturedValue = (List<int>)null;
+
+            var component = DropDown<List<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalList);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<List<int>>(this, value => capturedValue = value));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var items = component.FindAll(".rz-multiselect-item");
+            
+            // Select first item
+            items[0].Click();
+            component.Render();
+
+            // When ReferenceCollectionOnSelection is false (default), a new instance should be created
+            Assert.NotSame(originalList, capturedValue);
+            
+            // But the content should still be correct
+            Assert.Single(capturedValue);
+            Assert.Contains(1, capturedValue);
+        }
+
+        [Fact]
+        public void DropDown_Reset_PreservesCollectionInstanceButClears()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalHashSet = new HashSet<int> { 1, 2 }; // Pre-populate
+            var capturedValues = new List<HashSet<int>>();
+
+            var component = DropDownWithReferenceCollection<HashSet<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, originalHashSet);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<HashSet<int>>(this, value => capturedValues.Add(value)));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            // Verify initial state - collection should have 2 items
+            Assert.Equal(2, originalHashSet.Count);
+            Assert.Contains(1, originalHashSet);
+            Assert.Contains(2, originalHashSet);
+
+            // Call Reset (public method that calls ClearAll internally)
+            component.InvokeAsync(() => component.Instance.Reset());
+            component.Render();
+
+            // Verify the same HashSet instance is preserved
+            Assert.Single(capturedValues);
+            Assert.Same(originalHashSet, capturedValues[0]);
+            
+            // Verify the collection is now cleared
+            Assert.Empty(originalHashSet);
+        }
+
+        [Fact]
+        public void DropDown_SelectAll_PreservesCollectionInstanceAndPopulates()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var originalHashSet = new HashSet<int>(); // Start empty
+            var capturedValues = new List<HashSet<int>>();
+
+            var component = DropDownWithReferenceCollection<HashSet<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.AllowSelectAll, true);
+                parameters.Add(p => p.Value, originalHashSet);
+                parameters.Add(p => p.ValueChanged, EventCallback.Factory.Create<HashSet<int>>(this, value => capturedValues.Add(value)));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            // Verify initial state - collection should be empty
+            Assert.Empty(originalHashSet);
+
+            // Find and click the "Select All" checkbox
+            var selectAllCheckBox = component.Find(".rz-multiselect-header input[type='checkbox']");
+            selectAllCheckBox.Click();
+            component.Render();
+
+            // Verify the same HashSet instance is preserved
+            Assert.Single(capturedValues);
+            Assert.Same(originalHashSet, capturedValues[0]);
+            
+            // Verify the collection now contains both items
+            Assert.Equal(2, originalHashSet.Count);
+            Assert.Contains(1, originalHashSet);
+            Assert.Contains(2, originalHashSet);
+        }
+
+        [Fact]
+        public void DropDown_Renders_Multiple_WithChips_SelectedItemsTitle()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<IEnumerable<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Chips, true);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, new List<int> { 1, 2 });
+            });
+
+            var wrapper = component.Find(".rz-dropdown-chips-wrapper");
+            Assert.Equal("Item 1,Item 2", wrapper.GetAttribute("title"));
+        }
+
+        [Fact]
+        public void DropDown_Renders_Multiple_WithLabel_SelectedItemsTitle()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<IEnumerable<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Chips, false);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, new List<int> { 1, 2 });
+            });
+
+            var label = component.Find("span.rz-dropdown-label");
+            Assert.Equal("Item 1,Item 2", label.GetAttribute("title"));
+        }
+
+        [Fact]
+        public void DropDown_DoesNotRender_Multiple_SelectedItemsTitle_WithoutTextProperty()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[] { "Item 1", "Item 2" };
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<string>>>(parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Chips, true);
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.Value, new List<string> { "Item 1", "Item 2" });
+            });
+
+            var wrapper = component.Find(".rz-dropdown-chips-wrapper");
+            Assert.False(wrapper.HasAttribute("title"));
+        }
+
+        [Fact]
+        public void DropDown_Renders_Multiple_SelectedItemsTitle_CustomSeparator()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<IEnumerable<int>>(ctx, parameters =>
+            {
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Chips, false);
+                parameters.Add(p => p.Separator, "; ");
+                parameters.Add(p => p.MaxSelectedLabels, 1);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, new List<int> { 1, 2 });
+            });
+
+            var label = component.Find("span.rz-dropdown-label");
+            Assert.Equal("Item 1; Item 2", label.GetAttribute("title"));
+        }
+
+        class ReferenceCollectionDropDown<T> : Radzen.Blazor.RadzenDropDown<T>
+        {
+            protected override void OnInitialized()
+            {
+                PreserveCollectionOnSelection = true;
+                base.OnInitialized();
+            }
+        }
+
+        private static IRenderedComponent<ReferenceCollectionDropDown<T>> DropDownWithReferenceCollection<T>(TestContext ctx, Action<ComponentParameterCollectionBuilder<ReferenceCollectionDropDown<T>>> configure = null)
+        {
+            var data = new[] {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var component = ctx.RenderComponent<ReferenceCollectionDropDown<T>>();
+
+            component.SetParametersAndRender(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+
+                if (configure != null)
+                {
+                    configure.Invoke(parameters);
+                }
+                else
+                {
+                    parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                }
+            });
+
+            return component;
+        }
+
+        class DataItemComparer : IEqualityComparer<DataItem>, IEqualityComparer<object>
+        {
+            public bool Equals(DataItem x, DataItem y)
+            {
+                if (ReferenceEquals(x, y)) return true;
+                if (x is null) return false;
+                if (y is null) return false;
+                if (x.GetType() != y.GetType()) return false;
+                return x.Text == y.Text;
+            }
+
+            public int GetHashCode(DataItem obj)
+            {
+                return obj.Text.GetHashCode();
+            }
+
+            public new bool Equals(object x, object y)
+            {
+                return Equals((DataItem)x, (DataItem)y);
+            }
+
+            public int GetHashCode(object obj)
+            {
+                return GetHashCode((DataItem)obj);
+
+            }
+        }
+
+        class CustomCollection<T> : ICollection<T>
+        {
+            private readonly List<T> _items = new();
+
+            public int Count => _items.Count;
+            public bool IsReadOnly => false;
+
+            public void Add(T item) => _items.Add(item);
+            public void Clear() => _items.Clear();
+            public bool Contains(T item) => _items.Contains(item);
+            public void CopyTo(T[] array, int arrayIndex) => _items.CopyTo(array, arrayIndex);
+            public bool Remove(T item) => _items.Remove(item);
+            public IEnumerator<T> GetEnumerator() => _items.GetEnumerator();
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+        }
+
+        [Fact]
+        public void DropDown_Renders_Placeholder()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters.Add(p => p.Placeholder, "Select an option");
+            });
+
+            Assert.Contains("Select an option", component.Markup);
+            Assert.Contains("rz-placeholder", component.Markup);
+        }
+
+        [Fact]
+        public void DropDown_Renders_AllowClear_WithValue()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+            var data = new[] { new DataItem { Text = "Item 1", Id = 1 } };
+
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters.Add(p => p.AllowClear, true);
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, 1);
+            });
+
+            Assert.Contains("rz-dropdown-clear-icon", component.Markup);
+        }
+
+        class BaseDataItem
+        {
+            public string Text { get; set; }
+        }
+
+        class DerivedDataItem : BaseDataItem
+        {
+            public int Id { get; set; }
+        }
+
+        [Fact]
+        public void DropDown_Renders_SelectedBaseValue_WhenDataItemsAreDerived()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[] { new DerivedDataItem { Text = "Item 1", Id = 1 } };
+            var value = new BaseDataItem { Text = "Item 1" };
+
+            var component = ctx.RenderComponent<RadzenDropDown<BaseDataItem>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(BaseDataItem.Text));
+                parameters.Add(p => p.Value, value);
+            });
+
+            var dropdown = component.Find("div.rz-dropdown");
+
+            Assert.Equal("Item 1", dropdown.GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_DoesNotRender_AllowClear_WhenNotAllowed()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+            var data = new[] { new DataItem { Text = "Item 1", Id = 1 } };
+
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters.Add(p => p.AllowClear, false);
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, 1);
+            });
+
+            Assert.DoesNotContain("rz-dropdown-clear-icon", component.Markup);
+        }
+
+        [Fact]
+        public void DropDown_FilterInput_HasComboboxAriaAttributes()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.AllowFiltering, true);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var listbox = component.Find("ul[role='listbox']");
+            var filterInput = component.Find("input.rz-dropdown-filter");
+
+            Assert.Equal("combobox", filterInput.GetAttribute("role"));
+            Assert.Equal(listbox.Id, filterInput.GetAttribute("aria-controls"));
+            Assert.Equal("listbox", filterInput.GetAttribute("aria-haspopup"));
+            Assert.NotNull(filterInput.GetAttribute("aria-expanded"));
+            Assert.Equal("list", filterInput.GetAttribute("aria-autocomplete"));
+        }
+
+        [Fact]
+        public void DropDown_TriggerIcon_IsHiddenFromAssistiveTechnology()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx);
+
+            var icon = component.Find(".rz-dropdown-trigger-icon");
+
+            Assert.Equal("true", icon.GetAttribute("aria-hidden"));
+        }
+
+        [Fact]
+        public void DropDown_NoFilter_Combobox_ControlsListbox()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.AllowFiltering, false);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            Assert.Empty(component.FindAll("input.rz-dropdown-filter"));
+
+            var combobox = component.Find("div[role='combobox']");
+            var listbox = component.Find("ul[role='listbox']");
+
+            Assert.Equal(listbox.Id, combobox.GetAttribute("aria-controls"));
+        }
+
+        [Fact]
+        public void DropDown_Multiple_FilterInput_HasComboboxAriaAttributes()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.AllowFiltering, true);
+            });
+
+            var listbox = component.Find("ul[role='listbox']");
+            var filterInput = component.Find(".rz-multiselect-filter-container input");
+
+            Assert.Equal("combobox", filterInput.GetAttribute("role"));
+            Assert.Equal(listbox.Id, filterInput.GetAttribute("aria-controls"));
+            Assert.Equal("listbox", filterInput.GetAttribute("aria-haspopup"));
+            Assert.NotNull(filterInput.GetAttribute("aria-expanded"));
+            Assert.Equal("list", filterInput.GetAttribute("aria-autocomplete"));
+        }
+
+        [Fact]
+        public void DropDown_ConsumerSuppliedAriaLabel_OverridesComputedAriaLabel()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.AddUnmatched("aria-label", "Filter by status");
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+
+            Assert.Equal("Filter by status", combobox.GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_Multiple_AriaLabel_ReflectsSelectedItems()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+                new DataItem { Text = "Item 3", Id = 3 },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Value, new List<int> { 1, 3 });
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+
+            Assert.Equal("Item 1,Item 3", combobox.GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_Multiple_AriaLabel_ShowsCount_WhenAboveMaxSelectedLabels()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+                new DataItem { Text = "Item 3", Id = 3 },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.MaxSelectedLabels, 2);
+                parameters.Add(p => p.Value, new List<int> { 1, 2, 3 });
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+
+            Assert.Equal($"3 {component.Instance.SelectedItemsText}", combobox.GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_Chips_RemoveButtons_AreNotTabbable()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Chips, true);
+                parameters.Add(p => p.Value, new List<int> { 1, 2 });
+            });
+
+            var buttons = component.FindAll(".rz-chip button");
+
+            Assert.NotEmpty(buttons);
+            Assert.All(buttons, b => Assert.Equal("-1", b.GetAttribute("tabindex")));
+        }
+
+        [Fact]
+        public void DropDown_HiddenHelperInput_IsHiddenFromAccessibilityTree()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var hiddenInput = component.Find(".rz-helper-hidden-accessible input");
+
+            Assert.Equal("true", hiddenInput.GetAttribute("aria-hidden"));
+            Assert.Equal("-1", hiddenInput.GetAttribute("tabindex"));
+        }
+
+        [Fact]
+        public void DropDown_WithoutConsumerAriaLabel_FallsBackToComputedAriaLabel()
+        {
+            using var ctx = new TestContext();
+
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, 1);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+
+            Assert.Equal("Item 1", combobox.GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_Renders_LoadingTemplate_WhenIsLoading()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters
+                    .Add(p => p.IsLoading, true)
+                    .Add(p => p.LoadingTemplate, b => b.AddMarkupContent(0, "<span class=\"loading-marker\">Loading...</span>"));
+            });
+
+            Assert.Contains("loading-marker", component.Markup);
+            Assert.DoesNotContain("Item 1", component.Markup);
+            Assert.DoesNotContain("Item 2", component.Markup);
+        }
+
+        [Fact]
+        public void DropDown_DoesNotRender_LoadingTemplate_WhenNotLoading()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters
+                    .Add(p => p.LoadingTemplate, b => b.AddMarkupContent(0, "<span class=\"loading-marker\">Loading...</span>"));
+            });
+
+            Assert.DoesNotContain("loading-marker", component.Markup);
+            Assert.Contains("Item 1", component.Markup);
+        }
+
+        [Fact]
+        public void DropDown_Suppresses_EmptyTemplate_WhileLoading()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters
+                    .Add(p => p.Data, new DataItem[] { })
+                    .Add(p => p.TextProperty, nameof(DataItem.Text))
+                    .Add(p => p.IsLoading, true)
+                    .Add(p => p.EmptyTemplate, b => b.AddMarkupContent(0, "<span class=\"empty-marker\">No data</span>"));
+            });
+
+            Assert.DoesNotContain("empty-marker", component.Markup);
+        }
+
+        private static IRenderedComponent<RadzenDropDown<IEnumerable<int>>> MultipleDropDown(TestContext ctx, Action<IEnumerable<int>> valueChanged, Action<ComponentParameterCollectionBuilder<RadzenDropDown<IEnumerable<int>>>> configure = null)
+        {
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            return ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.TextProperty, nameof(DataItem.Text));
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.ValueChanged, valueChanged);
+                configure?.Invoke(parameters);
+            });
+        }
+
+        private static Microsoft.AspNetCore.Components.Web.KeyboardEventArgs CtrlA => new Microsoft.AspNetCore.Components.Web.KeyboardEventArgs { Key = "a", Code = "KeyA", CtrlKey = true };
+
+        [Fact]
+        public void DropDown_Multiple_CtrlA_SelectsAllItems()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            IEnumerable<int> value = null;
+            var component = MultipleDropDown(ctx, v => value = v);
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.KeyDown(CtrlA);
+
+            Assert.Equal(new[] { 1, 2 }, value);
+        }
+
+        [Fact]
+        public void DropDown_Multiple_CtrlA_TogglesToNoneWhenAllSelected()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            IEnumerable<int> value = null;
+            var component = MultipleDropDown(ctx, v => value = v);
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.KeyDown(CtrlA);
+            combobox.KeyDown(CtrlA);
+
+            Assert.Empty(value);
+        }
+
+        [Fact]
+        public void DropDown_Multiple_CtrlA_WithFilteringEnabled_SelectsAllItems()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            IEnumerable<int> value = null;
+            var component = MultipleDropDown(ctx, v => value = v, parameters =>
+            {
+                parameters.Add(p => p.AllowFiltering, true);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.KeyDown(CtrlA);
+
+            Assert.Equal(new[] { 1, 2 }, value);
+        }
+
+        [Fact]
+        public void DropDown_Multiple_CtrlA_DoesNothingWhenSelectAllNotAllowed()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            IEnumerable<int> value = null;
+            var component = MultipleDropDown(ctx, v => value = v, parameters =>
+            {
+                parameters.Add(p => p.AllowSelectAll, false);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.KeyDown(CtrlA);
+
+            Assert.Null(value);
+        }
+
+        [Fact]
+        public void DropDown_Multiple_CtrlA_DoesNothingWhenReadOnly()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            IEnumerable<int> value = null;
+            var component = MultipleDropDown(ctx, v => value = v, parameters =>
+            {
+                parameters.Add(p => p.ReadOnly, true);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.KeyDown(CtrlA);
+
+            Assert.Null(value);
+        }
+
+        [Fact]
+        public void DropDown_OpenOnFocus_FocusThenClick_OpensPopupOnce()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.OpenOnFocus, true);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.Focus(new Microsoft.AspNetCore.Components.Web.FocusEventArgs());
+            combobox.Click();
+
+            Assert.Equal(1, ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.openPopup"));
+            Assert.Equal(0, ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.closePopup"));
+        }
+
+        [Fact]
+        public void DropDown_OpenOnFocus_ClickWhileOpen_ClosesPopup()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.OpenOnFocus, true);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.Focus(new Microsoft.AspNetCore.Components.Web.FocusEventArgs());
+            combobox.Click();
+            combobox.Click();
+
+            Assert.Equal(1, ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.openPopup"));
+            Assert.Equal(1, ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.closePopup"));
+        }
+
+        [Fact]
+        public void DropDown_WithoutOpenOnFocus_Click_TogglesPopup()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.Click();
+
+            Assert.Equal(1, ctx.JSInterop.Invocations.Count(i => i.Identifier == "Radzen.togglePopup"));
+        }
+
+        [Fact]
+        public void DropDown_Single_CtrlA_DoesNotChangeValue()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var changed = false;
+            var component = DropDown<int>(ctx, parameters =>
+            {
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Change, _ => changed = true);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+            combobox.KeyDown(CtrlA);
+
+            Assert.False(changed);
+        }
+
+        [Fact]
+        public void DropDown_OmitsOptionAriaLabel_WhenTextPropertyIsMissingAndItemHasNoText()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var template = (RenderFragment<dynamic>)(item => builder => builder.AddContent(0, item.Text));
+
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Template, template);
+                parameters.Add(p => p.Value, 1);
+            });
+
+            var options = component.FindAll("li[role='option']");
+
+            Assert.NotEmpty(options);
+            Assert.All(options, option => Assert.False(option.HasAttribute("aria-label")));
+            Assert.Equal("Item 1", options[0].TextContent.Trim());
+            Assert.DoesNotContain(typeof(DataItem).FullName, component.Markup);
+        }
+
+        [Fact]
+        public void DropDown_RendersOptionAriaLabel_FromTextProperty()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = DropDown<int>(ctx);
+
+            var options = component.FindAll("li[role='option']");
+
+            Assert.Equal("Item 1", options[0].GetAttribute("aria-label"));
+            Assert.Equal("Item 2", options[1].GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_RendersOptionAriaLabel_ForSimpleValuesWithoutTextProperty()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var component = ctx.RenderComponent<RadzenDropDown<string>>(parameters =>
+            {
+                parameters.Add(p => p.Data, new[] { "Apple", "Banana" });
+            });
+
+            var options = component.FindAll("li[role='option']");
+
+            Assert.Equal("Apple", options[0].GetAttribute("aria-label"));
+            Assert.Equal("Banana", options[1].GetAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_OmitsComboboxAriaLabel_WhenSelectedItemHasNoText()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[] { new DataItem { Text = "Item 1", Id = 1 } };
+
+            var component = ctx.RenderComponent<RadzenDropDown<int>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Value, 1);
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+
+            Assert.False(combobox.HasAttribute("aria-label"));
+        }
+
+        [Fact]
+        public void DropDown_Multiple_AriaLabelAndChipsFallBackToCount_WhenItemsHaveNoText()
+        {
+            using var ctx = new TestContext();
+            ctx.JSInterop.Mode = JSRuntimeMode.Loose;
+
+            var data = new[]
+            {
+                new DataItem { Text = "Item 1", Id = 1 },
+                new DataItem { Text = "Item 2", Id = 2 },
+            };
+
+            var component = ctx.RenderComponent<RadzenDropDown<IEnumerable<int>>>(parameters =>
+            {
+                parameters.Add(p => p.Data, data);
+                parameters.Add(p => p.ValueProperty, nameof(DataItem.Id));
+                parameters.Add(p => p.Multiple, true);
+                parameters.Add(p => p.Chips, true);
+                parameters.Add(p => p.Value, new List<int> { 1, 2 });
+            });
+
+            var combobox = component.Find("div[role='combobox']");
+
+            Assert.Equal($"2 {component.Instance.SelectedItemsText}", combobox.GetAttribute("aria-label"));
+
+            var buttons = component.FindAll(".rz-chip button");
+
+            Assert.NotEmpty(buttons);
+            Assert.All(buttons, b => Assert.Equal(component.Instance.RemoveChipTitle, b.GetAttribute("aria-label")));
+        }
+    }
+}

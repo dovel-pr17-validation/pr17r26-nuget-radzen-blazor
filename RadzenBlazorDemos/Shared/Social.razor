@@ -1,0 +1,39 @@
+@if (ready) 
+{
+    <RadzenStack Gap="2rem" class="rz-my-12">
+        <RadzenStack Orientation="Orientation.Horizontal" JustifyContent="JustifyContent.Center" Gap="1rem" Wrap="FlexWrap.Wrap">
+            <RadzenLink Path="https://github.com/radzenhq/radzen-blazor/" title="Star Radzen on GitHub">
+                <img alt="Star Radzen on GitHub" src="https://img.shields.io/github/stars/radzenhq/radzen-blazor?color=ff504d&logo=github&style=flat-square" style="border-radius: 20px;" />
+            </RadzenLink>
+            <RadzenLink Path="https://github.com/radzenhq/radzen-blazor/graphs/contributors">
+                <img alt="Github Contributors" src="https://img.shields.io/github/contributors/radzenhq/radzen-blazor?color=ff504d&logo=github&style=flat-square" style="border-radius: 20px;" />
+            </RadzenLink>
+            <RadzenLink Path="https://www.nuget.org/packages/Radzen.Blazor">
+                <img alt="Nuget Downloads" src="https://img.shields.io/nuget/dt/Radzen.Blazor?color=ff504d&label=nuget%20downloads&logo=nuget&style=flat-square" style="border-radius: 20px;" />
+            </RadzenLink>
+            <span name="last-commit">
+                <img alt="Last Commit" src="https://img.shields.io/github/last-commit/radzenhq/radzen-blazor?color=ff504d&logo=github&style=flat-square" style="border-radius: 20px;" />
+            </span>
+        </RadzenStack>
+        
+        <RadzenStack Orientation="Orientation.Horizontal" AlignItems="AlignItems.Center" JustifyContent="JustifyContent.Center" Gap="1rem">
+            <RadzenLink Path="https://www.youtube.com/channel/UCAX4L9SPAigw41-RqTYEeKg" title="Watch Radzen YouTube videos">
+                <img alt="Subscribe to Radzen on YouTube" src="https://img.shields.io/youtube/channel/subscribers/UCAX4L9SPAigw41-RqTYEeKg?color=ff504d&logo=youtube&style=flat-square&label=YouTube" style="border-radius: 20px;" />
+            </RadzenLink>
+            <iframe title="Follow Radzen on twitter" frameborder="0" scrolling="no" src="https://platform.twitter.com/widgets/follow_button.html?screen_name=radzenhq&show_screen_name=false&show_count=true" width="80px" height="20px"></iframe>
+            <script src="https://platform.linkedin.com/in.js" type="text/javascript">lang: en_US</script>
+            <script type="IN/FollowCompany" data-id="17934116"></script>
+        </RadzenStack>
+    </RadzenStack>
+}
+@code {
+    bool ready;
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender)
+        {
+            ready = true;
+            await InvokeAsync(StateHasChanged);
+        }
+    }
+}
